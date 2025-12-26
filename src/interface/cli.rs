@@ -1,5 +1,7 @@
 use crate::application::app;
-use crate::domain::{CgbFlag, RomHeader, SgbFlag};
+use crate::domain::{
+    CartridgeType, CgbFlag, Destination, Licensee, RamSize, RomHeader, RomSize, SgbFlag,
+};
 use crate::infrastructure::rom_loader::RomLoadError;
 
 pub fn run() {
@@ -36,15 +38,11 @@ fn print_header(header: &RomHeader) {
     println!("Title: {}", header.title);
     println!("CGB: {}", cgb_flag_label(header.cgb_flag));
     println!("SGB: {}", sgb_flag_label(header.sgb_flag));
-    println!("Cartridge Type: 0x{:02X}", header.cartridge_type);
-    println!("ROM Size Code: 0x{:02X}", header.rom_size_code);
-    println!("RAM Size Code: 0x{:02X}", header.ram_size_code);
-    println!("Destination Code: 0x{:02X}", header.destination_code);
-    println!(
-        "New Licensee Code: {}",
-        format_licensee_code(header.new_licensee_code)
-    );
-    println!("Old Licensee Code: 0x{:02X}", header.old_licensee_code);
+    println!("Cartridge Type: {}", cartridge_type_label(header.cartridge_type));
+    println!("ROM Size: {}", rom_size_label(header.rom_size));
+    println!("RAM Size: {}", ram_size_label(header.ram_size));
+    println!("Destination: {}", destination_label(header.destination));
+    println!("Licensee: {}", licensee_label(&header.licensee));
     println!("Mask ROM Version: 0x{:02X}", header.mask_rom_version);
     println!("Header Checksum: 0x{:02X}", header.header_checksum);
     println!("Global Checksum: 0x{:04X}", header.global_checksum);
@@ -77,8 +75,61 @@ fn sgb_flag_label(flag: SgbFlag) -> String {
     }
 }
 
-fn format_licensee_code(code: [u8; 2]) -> String {
-    format!("{:02X}{:02X}", code[0], code[1])
+fn cartridge_type_label(cartridge_type: CartridgeType) -> String {
+    format!(
+        "0x{:02X} ({})",
+        cartridge_type.code(),
+        cartridge_type.description()
+    )
+}
+
+fn rom_size_label(rom_size: RomSize) -> String {
+    match (rom_size.bytes(), rom_size.bank_count()) {
+        (Some(bytes), Some(banks)) => format!(
+            "0x{:02X} ({} KiB, {} banks)",
+            rom_size.code(),
+            bytes / 1024,
+            banks
+        ),
+        _ => format!("0x{:02X} (Unknown)", rom_size.code()),
+    }
+}
+
+fn ram_size_label(ram_size: RamSize) -> String {
+    match ram_size {
+        RamSize::None => format!("0x{:02X} (None)", ram_size.code()),
+        _ => match ram_size.bytes() {
+            Some(bytes) => format!("0x{:02X} ({} KiB)", ram_size.code(), bytes / 1024),
+            None => format!("0x{:02X} (Unknown)", ram_size.code()),
+        },
+    }
+}
+
+fn destination_label(destination: Destination) -> &'static str {
+    match destination {
+        Destination::Japan => "Japan",
+        Destination::NonJapan => "Non-Japan",
+        Destination::Unknown(_) => "Unknown",
+    }
+}
+
+fn licensee_label(licensee: &Licensee) -> String {
+    match licensee {
+        Licensee::Old(code) => format!("Old {}", format_old_licensee_code(*code)),
+        Licensee::New(code) => format!("New {}", format_new_licensee_code(*code)),
+    }
+}
+
+fn format_old_licensee_code(code: u8) -> String {
+    format!("0x{:02X}", code)
+}
+
+fn format_new_licensee_code(code: [u8; 2]) -> String {
+    if code.iter().all(|byte| byte.is_ascii_graphic()) {
+        String::from_utf8_lossy(&code).to_string()
+    } else {
+        format!("{:02X}{:02X}", code[0], code[1])
+    }
 }
 
 fn print_usage(program: &str) {
