@@ -89,10 +89,7 @@ impl RomHeader {
         let title_bytes = &bytes[TITLE_START..=title_end];
         let title = parse_title(title_bytes);
 
-        let new_licensee_code = [
-            bytes[NEW_LICENSEE_START],
-            bytes[NEW_LICENSEE_START + 1],
-        ];
+        let new_licensee_code = [bytes[NEW_LICENSEE_START], bytes[NEW_LICENSEE_START + 1]];
 
         let header_checksum = bytes[HEADER_CHECKSUM_ADDR];
         let global_checksum =
@@ -129,7 +126,10 @@ impl Rom {
 }
 
 fn parse_title(bytes: &[u8]) -> String {
-    let end = bytes.iter().position(|&byte| byte == 0).unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
     let title = &bytes[..end];
     String::from_utf8_lossy(title).trim().to_string()
 }
