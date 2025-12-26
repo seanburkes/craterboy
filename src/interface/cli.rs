@@ -1,7 +1,7 @@
 use crate::application::app;
 use crate::domain::{
-    compute_global_checksum, compute_header_checksum, nintendo_logo_matches, CartridgeType,
-    CgbFlag, Destination, Licensee, RamSize, Rom, RomHeader, RomSize, SgbFlag,
+    CartridgeType, CgbFlag, Destination, Licensee, RamSize, Rom, RomHeader, RomSize, SgbFlag,
+    compute_global_checksum, compute_header_checksum, nintendo_logo_matches,
 };
 use crate::infrastructure::rom_loader::RomLoadError;
 
