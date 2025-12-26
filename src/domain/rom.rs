@@ -457,8 +457,8 @@ fn format_new_licensee_code(code: [u8; 2]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CartridgeType, CgbFlag, Destination, Licensee, RamSize, RomHeader, RomHeaderError,
-        RomSize, SgbFlag,
+        CartridgeType, CgbFlag, Destination, Licensee, RamSize, RomHeader, RomHeaderError, RomSize,
+        SgbFlag,
     };
 
     #[test]

@@ -38,7 +38,10 @@ fn print_header(header: &RomHeader) {
     println!("Title: {}", header.title);
     println!("CGB: {}", cgb_flag_label(header.cgb_flag));
     println!("SGB: {}", sgb_flag_label(header.sgb_flag));
-    println!("Cartridge Type: {}", cartridge_type_label(header.cartridge_type));
+    println!(
+        "Cartridge Type: {}",
+        cartridge_type_label(header.cartridge_type)
+    );
     println!("ROM Size: {}", rom_size_label(header.rom_size));
     println!("RAM Size: {}", ram_size_label(header.ram_size));
     println!("Destination: {}", destination_label(header.destination));
