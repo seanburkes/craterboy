@@ -1,13 +1,36 @@
 use crate::application::app;
 use crate::domain::{
-    CartridgeType, CgbFlag, Destination, Licensee, RamSize, RomHeader, RomSize, SgbFlag,
+    compute_global_checksum, compute_header_checksum, nintendo_logo_matches, CartridgeType,
+    CgbFlag, Destination, Licensee, RamSize, Rom, RomHeader, RomSize, SgbFlag,
 };
 use crate::infrastructure::rom_loader::RomLoadError;
 
 pub fn run() {
     let mut args = std::env::args();
     let program = args.next().unwrap_or_else(|| "craterboy".to_string());
-    let path = match args.next() {
+    let mut path: Option<String> = None;
+    let mut verbose = false;
+
+    for arg in args {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print_usage(&program);
+                return;
+            }
+            "-v" | "--verbose" => {
+                verbose = true;
+            }
+            _ => {
+                if path.is_some() {
+                    print_usage(&program);
+                    std::process::exit(2);
+                }
+                path = Some(arg);
+            }
+        }
+    }
+
+    let path = match path {
         Some(path) => path,
         None => {
             print_usage(&program);
@@ -15,22 +38,28 @@ pub fn run() {
         }
     };
 
-    if path == "-h" || path == "--help" {
-        print_usage(&program);
-        return;
-    }
-
-    if args.next().is_some() {
-        print_usage(&program);
-        std::process::exit(2);
-    }
-
-    match app::load_rom_header(&path) {
-        Ok(header) => print_header(&header),
+    match app::load_rom(&path) {
+        Ok(rom) => print_report(&path, &rom, verbose),
         Err(err) => {
             report_load_error(&path, err);
             std::process::exit(1);
         }
+    }
+}
+
+fn print_report(path: &str, rom: &Rom, verbose: bool) {
+    println!("ROM: {}", path);
+    println!(
+        "File Size: {} bytes ({} KiB)",
+        rom.bytes.len(),
+        rom.bytes.len() / 1024
+    );
+    println!("ROM ID (fnv1a64): {:016X}", fnv1a64(&rom.bytes));
+    print_header(&rom.header);
+    print_checks(rom);
+
+    if verbose {
+        print_header_bytes(&rom.bytes);
     }
 }
 
@@ -78,6 +107,90 @@ fn sgb_flag_label(flag: SgbFlag) -> String {
     }
 }
 
+fn print_checks(rom: &Rom) {
+    let mut warnings = Vec::new();
+
+    let logo_ok = nintendo_logo_matches(&rom.bytes);
+    println!("Nintendo Logo: {}", check_label(logo_ok));
+    if logo_ok == Some(false) {
+        warnings.push("Nintendo logo check failed".to_string());
+    }
+
+    let computed_header = compute_header_checksum(&rom.bytes);
+    match computed_header {
+        Some(computed) => {
+            let ok = computed == rom.header.header_checksum;
+            println!(
+                "Header Checksum: {} (expected 0x{:02X}, computed 0x{:02X})",
+                if ok { "OK" } else { "FAIL" },
+                rom.header.header_checksum,
+                computed
+            );
+            if !ok {
+                warnings.push("Header checksum mismatch".to_string());
+            }
+        }
+        None => {
+            println!("Header Checksum: Unknown");
+        }
+    }
+
+    let computed_global = compute_global_checksum(&rom.bytes);
+    match computed_global {
+        Some(computed) => {
+            let ok = computed == rom.header.global_checksum;
+            println!(
+                "Global Checksum: {} (expected 0x{:04X}, computed 0x{:04X})",
+                if ok { "OK" } else { "FAIL" },
+                rom.header.global_checksum,
+                computed
+            );
+            if !ok {
+                warnings.push("Global checksum mismatch".to_string());
+            }
+        }
+        None => {
+            println!("Global Checksum: Unknown");
+        }
+    }
+
+    if let Some(expected) = rom.header.rom_size.bytes() {
+        if expected != rom.bytes.len() {
+            warnings.push(format!(
+                "ROM size mismatch: header expects {} bytes, file has {} bytes",
+                expected,
+                rom.bytes.len()
+            ));
+        }
+    } else {
+        warnings.push("Unknown ROM size code".to_string());
+    }
+
+    if matches!(rom.header.ram_size, RamSize::Unknown(_)) {
+        warnings.push("Unknown RAM size code".to_string());
+    }
+
+    if matches!(rom.header.destination, Destination::Unknown(_)) {
+        warnings.push("Unknown destination code".to_string());
+    }
+
+    if matches!(rom.header.cartridge_type, CartridgeType::Unknown(_)) {
+        warnings.push("Unknown cartridge type".to_string());
+    } else if !rom.header.cartridge_type.is_supported() {
+        warnings.push(format!(
+            "Cartridge type not supported yet: {}",
+            cartridge_type_label(rom.header.cartridge_type)
+        ));
+    }
+
+    if !warnings.is_empty() {
+        println!("Warnings:");
+        for warning in warnings {
+            println!("- {}", warning);
+        }
+    }
+}
+
 fn cartridge_type_label(cartridge_type: CartridgeType) -> String {
     format!(
         "0x{:02X} ({})",
@@ -108,33 +221,48 @@ fn ram_size_label(ram_size: RamSize) -> String {
     }
 }
 
-fn destination_label(destination: Destination) -> &'static str {
-    match destination {
-        Destination::Japan => "Japan",
-        Destination::NonJapan => "Non-Japan",
-        Destination::Unknown(_) => "Unknown",
-    }
+fn destination_label(destination: Destination) -> String {
+    destination.label()
 }
 
 fn licensee_label(licensee: &Licensee) -> String {
-    match licensee {
-        Licensee::Old(code) => format!("Old {}", format_old_licensee_code(*code)),
-        Licensee::New(code) => format!("New {}", format_new_licensee_code(*code)),
-    }
-}
-
-fn format_old_licensee_code(code: u8) -> String {
-    format!("0x{:02X}", code)
-}
-
-fn format_new_licensee_code(code: [u8; 2]) -> String {
-    if code.iter().all(|byte| byte.is_ascii_graphic()) {
-        String::from_utf8_lossy(&code).to_string()
-    } else {
-        format!("{:02X}{:02X}", code[0], code[1])
-    }
+    licensee.label()
 }
 
 fn print_usage(program: &str) {
-    eprintln!("Usage: {} <rom-path>", program);
+    eprintln!("Usage: {} [--verbose] <rom-path>", program);
+}
+
+fn print_header_bytes(bytes: &[u8]) {
+    if bytes.len() < 0x150 {
+        return;
+    }
+
+    let header_slice = &bytes[0x0134..=0x014F];
+    let line = header_slice
+        .iter()
+        .map(|byte| format!("{:02X}", byte))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!("Header Bytes (0x0134..0x014F): {}", line);
+}
+
+fn check_label(result: Option<bool>) -> &'static str {
+    match result {
+        Some(true) => "OK",
+        Some(false) => "FAIL",
+        None => "Unknown",
+    }
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x00000100000001B3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }

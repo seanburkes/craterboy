@@ -13,6 +13,14 @@ const OLD_LICENSEE_ADDR: usize = 0x014B;
 const MASK_ROM_VERSION_ADDR: usize = 0x014C;
 const HEADER_CHECKSUM_ADDR: usize = 0x014D;
 const GLOBAL_CHECKSUM_ADDR: usize = 0x014E;
+const NINTENDO_LOGO_START: usize = 0x0104;
+const NINTENDO_LOGO_END: usize = 0x0133;
+const NINTENDO_LOGO: [u8; 48] = [
+    0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C,
+    0x00, 0x0D, 0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6,
+    0xDD, 0xDD, 0xD9, 0x99, 0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC,
+    0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CgbFlag {
@@ -184,7 +192,12 @@ impl CartridgeType {
             Self::Unknown(_) => "Unknown",
         }
     }
+
+    pub fn is_supported(self) -> bool {
+        matches!(self, Self::RomOnly)
+    }
 }
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RomSize {
@@ -337,6 +350,14 @@ impl Destination {
             Self::Unknown(value) => value,
         }
     }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::Japan => "Japan".to_string(),
+            Self::NonJapan => "Non-Japan".to_string(),
+            Self::Unknown(value) => format!("Unknown (0x{:02X})", value),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,8 +377,15 @@ impl Licensee {
 
     pub fn code_string(&self) -> String {
         match self {
-            Self::Old(code) => format!("0x{:02X}", code),
+            Self::Old(code) => format_old_licensee_code(*code),
             Self::New(code) => format_new_licensee_code(*code),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::Old(code) => format!("Old {}", format_old_licensee_code(*code)),
+            Self::New(code) => format!("New {}", format_new_licensee_code(*code)),
         }
     }
 }
@@ -446,6 +474,10 @@ fn parse_title(bytes: &[u8]) -> String {
     String::from_utf8_lossy(title).trim().to_string()
 }
 
+fn format_old_licensee_code(code: u8) -> String {
+    format!("0x{:02X}", code)
+}
+
 fn format_new_licensee_code(code: [u8; 2]) -> String {
     if code.iter().all(|byte| byte.is_ascii_graphic()) {
         String::from_utf8_lossy(&code).to_string()
@@ -454,11 +486,48 @@ fn format_new_licensee_code(code: [u8; 2]) -> String {
     }
 }
 
+pub fn nintendo_logo_matches(bytes: &[u8]) -> Option<bool> {
+    if bytes.len() < MIN_ROM_SIZE {
+        return None;
+    }
+
+    let logo = &bytes[NINTENDO_LOGO_START..=NINTENDO_LOGO_END];
+    Some(logo == NINTENDO_LOGO.as_slice())
+}
+
+pub fn compute_header_checksum(bytes: &[u8]) -> Option<u8> {
+    if bytes.len() < MIN_ROM_SIZE {
+        return None;
+    }
+
+    let mut checksum: u8 = 0;
+    for byte in &bytes[TITLE_START..=MASK_ROM_VERSION_ADDR] {
+        checksum = checksum.wrapping_sub(*byte).wrapping_sub(1);
+    }
+    Some(checksum)
+}
+
+pub fn compute_global_checksum(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() < MIN_ROM_SIZE {
+        return None;
+    }
+
+    let mut checksum: u16 = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if index == GLOBAL_CHECKSUM_ADDR || index == GLOBAL_CHECKSUM_ADDR + 1 {
+            continue;
+        }
+        checksum = checksum.wrapping_add(u16::from(*byte));
+    }
+    Some(checksum)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CartridgeType, CgbFlag, Destination, Licensee, RamSize, RomHeader, RomHeaderError, RomSize,
-        SgbFlag,
+        compute_header_checksum, nintendo_logo_matches, CartridgeType, CgbFlag, Destination,
+        Licensee, RamSize, RomHeader, RomHeaderError, RomSize, SgbFlag, NINTENDO_LOGO,
+        NINTENDO_LOGO_START,
     };
 
     #[test]
@@ -527,5 +596,23 @@ mod tests {
                 actual: super::MIN_ROM_SIZE - 1
             }
         );
+    }
+
+    #[test]
+    fn header_checksum_matches_known_value_for_zeroed_header() {
+        let rom = vec![0; super::MIN_ROM_SIZE];
+
+        let checksum = compute_header_checksum(&rom).expect("checksum");
+
+        assert_eq!(checksum, 0xE7);
+    }
+
+    #[test]
+    fn nintendo_logo_check_detects_expected_bytes() {
+        let mut rom = vec![0; super::MIN_ROM_SIZE];
+        rom[NINTENDO_LOGO_START..NINTENDO_LOGO_START + NINTENDO_LOGO.len()]
+            .copy_from_slice(&NINTENDO_LOGO);
+
+        assert_eq!(nintendo_logo_matches(&rom), Some(true));
     }
 }
