@@ -21,7 +21,7 @@ impl Bus {
     }
 
     pub fn write8(&mut self, addr: u16, value: u8) {
-        self.mbc.write8(addr, value);
+        self.mbc.write8(&mut self.cartridge, addr, value);
     }
 }
 

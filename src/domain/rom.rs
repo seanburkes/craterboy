@@ -193,7 +193,55 @@ impl CartridgeType {
     }
 
     pub fn is_supported(self) -> bool {
-        matches!(self, Self::RomOnly)
+        matches!(
+            self,
+            Self::RomOnly
+                | Self::RomRam
+                | Self::RomRamBattery
+                | Self::Mbc1
+                | Self::Mbc1Ram
+                | Self::Mbc1RamBattery
+        )
+    }
+
+    pub fn has_ram(self) -> bool {
+        matches!(
+            self,
+            Self::RomRam
+                | Self::RomRamBattery
+                | Self::Mmm01Ram
+                | Self::Mmm01RamBattery
+                | Self::Mbc1Ram
+                | Self::Mbc1RamBattery
+                | Self::Mbc2
+                | Self::Mbc2Battery
+                | Self::Mbc3Ram
+                | Self::Mbc3RamBattery
+                | Self::Mbc3TimerRamBattery
+                | Self::Mbc5Ram
+                | Self::Mbc5RamBattery
+                | Self::Mbc5RumbleRam
+                | Self::Mbc5RumbleRamBattery
+                | Self::Mbc7SensorRumbleRamBattery
+                | Self::HuC1RamBattery
+        )
+    }
+
+    pub fn has_battery(self) -> bool {
+        matches!(
+            self,
+            Self::RomRamBattery
+                | Self::Mmm01RamBattery
+                | Self::Mbc1RamBattery
+                | Self::Mbc2Battery
+                | Self::Mbc3TimerBattery
+                | Self::Mbc3TimerRamBattery
+                | Self::Mbc3RamBattery
+                | Self::Mbc5RamBattery
+                | Self::Mbc5RumbleRamBattery
+                | Self::Mbc7SensorRumbleRamBattery
+                | Self::HuC1RamBattery
+        )
     }
 }
 

@@ -11,12 +11,18 @@ const OPEN_BUS: u8 = 0xFF;
 pub struct Cartridge {
     pub bytes: Vec<u8>,
     pub header: RomHeader,
+    pub ext_ram: Vec<u8>,
 }
 
 impl Cartridge {
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, RomHeaderError> {
         let header = RomHeader::parse(&bytes)?;
-        Ok(Self { bytes, header })
+        let ext_ram = vec![0; header.ram_size.bytes().unwrap_or(0)];
+        Ok(Self {
+            bytes,
+            header,
+            ext_ram,
+        })
     }
 
     pub fn banked_rom(&self) -> RomBankView<'_> {
@@ -33,6 +39,27 @@ impl Cartridge {
 
     pub fn declared_bank_count(&self) -> Option<usize> {
         self.header.rom_size.bank_count()
+    }
+
+    pub fn has_ram(&self) -> bool {
+        !self.ext_ram.is_empty()
+    }
+
+    pub fn has_battery(&self) -> bool {
+        self.header.cartridge_type.has_battery()
+    }
+
+    pub fn ram(&self) -> &[u8] {
+        &self.ext_ram
+    }
+
+    pub fn ram_mut(&mut self) -> &mut [u8] {
+        &mut self.ext_ram
+    }
+
+    pub fn load_ram(&mut self, data: &[u8]) {
+        let len = self.ext_ram.len().min(data.len());
+        self.ext_ram[..len].copy_from_slice(&data[..len]);
     }
 }
 

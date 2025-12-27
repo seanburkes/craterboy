@@ -88,6 +88,9 @@ fn report_load_error(path: &str, err: RomLoadError) {
         RomLoadError::Header(header_err) => {
             eprintln!("Invalid ROM header for '{}': {:?}", path, header_err);
         }
+        RomLoadError::SaveIo(io_err) => {
+            eprintln!("Failed to read save data for '{}': {}", path, io_err);
+        }
     }
 }
 
