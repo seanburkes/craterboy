@@ -1,7 +1,7 @@
 use crate::application::app;
 use crate::domain::{
-    Cartridge, CartridgeType, CgbFlag, Destination, Licensee, RamSize, RomHeader, RomSize,
-    SgbFlag, compute_global_checksum, compute_header_checksum, nintendo_logo_matches,
+    Cartridge, CartridgeType, CgbFlag, Destination, Licensee, RamSize, RomHeader, RomSize, SgbFlag,
+    compute_global_checksum, compute_header_checksum, nintendo_logo_matches,
 };
 use crate::infrastructure::rom_loader::RomLoadError;
 
@@ -54,10 +54,7 @@ fn print_report(path: &str, cartridge: &Cartridge, verbose: bool) {
         cartridge.bytes.len(),
         cartridge.bytes.len() / 1024
     );
-    println!(
-        "ROM ID (fnv1a64): {:016X}",
-        fnv1a64(&cartridge.bytes)
-    );
+    println!("ROM ID (fnv1a64): {:016X}", fnv1a64(&cartridge.bytes));
     print_header(&cartridge.header);
     print_checks(cartridge);
 
