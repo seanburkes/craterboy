@@ -1,34 +1,23 @@
-use super::cartridge::{Cartridge, RomBankMapping};
+use super::{Cartridge, Mbc, MbcError};
 
 #[derive(Debug)]
 pub struct Bus {
     cartridge: Cartridge,
-    switchable_rom_bank: usize,
+    mbc: Mbc,
 }
 
 impl Bus {
-    pub fn new(cartridge: Cartridge) -> Self {
-        Self {
-            cartridge,
-            switchable_rom_bank: 1,
-        }
+    pub fn new(cartridge: Cartridge) -> Result<Self, MbcError> {
+        let mbc = Mbc::new(&cartridge)?;
+        Ok(Self { cartridge, mbc })
     }
 
     pub fn cartridge(&self) -> &Cartridge {
         &self.cartridge
     }
 
-    pub fn switchable_rom_bank(&self) -> usize {
-        self.switchable_rom_bank
-    }
-
-    pub fn set_switchable_rom_bank(&mut self, bank: usize) {
-        self.switchable_rom_bank = bank;
-    }
-
     pub fn read8(&self, addr: u16) -> u8 {
-        RomBankMapping::with_switchable_bank(&self.cartridge.bytes, self.switchable_rom_bank)
-            .read(addr)
+        self.mbc.read8(&self.cartridge, addr)
     }
 }
 
@@ -46,12 +35,9 @@ mod tests {
         bytes[ROM_BANK_SIZE * 2..].fill(0x30);
 
         let cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
-        let mut bus = Bus::new(cartridge);
+        let bus = Bus::new(cartridge).expect("bus");
 
         assert_eq!(bus.read8(0x0000), 0x10);
         assert_eq!(bus.read8(0x4000), 0x20);
-
-        bus.set_switchable_rom_bank(2);
-        assert_eq!(bus.read8(0x4000), 0x30);
     }
 }
