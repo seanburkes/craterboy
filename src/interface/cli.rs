@@ -154,16 +154,35 @@ fn print_checks(rom: &Rom) {
         }
     }
 
-    if let Some(expected) = rom.header.rom_size.bytes() {
-        if expected != rom.bytes.len() {
-            warnings.push(format!(
-                "ROM size mismatch: header expects {} bytes, file has {} bytes",
-                expected,
-                rom.bytes.len()
-            ));
+    let expected_size = rom.header.rom_size.bytes();
+    match expected_size {
+        Some(expected) => {
+            if expected == rom.bytes.len() {
+                println!(
+                    "ROM Size Check: OK (expected {} bytes, file has {} bytes)",
+                    expected,
+                    rom.bytes.len()
+                );
+            } else {
+                println!(
+                    "ROM Size Check: FAIL (expected {} bytes, file has {} bytes)",
+                    expected,
+                    rom.bytes.len()
+                );
+                warnings.push(format!(
+                    "ROM size mismatch: header expects {} bytes, file has {} bytes",
+                    expected,
+                    rom.bytes.len()
+                ));
+            }
         }
-    } else {
-        warnings.push("Unknown ROM size code".to_string());
+        None => {
+            println!(
+                "ROM Size Check: Unknown (code 0x{:02X})",
+                rom.header.rom_size.code()
+            );
+            warnings.push("Unknown ROM size code".to_string());
+        }
     }
 
     if matches!(rom.header.ram_size, RamSize::Unknown(_)) {
