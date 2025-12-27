@@ -1,6 +1,6 @@
 use super::rom::{RomHeader, RomHeaderError};
 
-const ROM_BANK_SIZE: usize = 0x4000;
+pub(crate) const ROM_BANK_SIZE: usize = 0x4000;
 const ROM_FIXED_START: usize = 0x0000;
 const ROM_FIXED_END: usize = 0x3FFF;
 const ROM_SWITCH_START: usize = 0x4000;
