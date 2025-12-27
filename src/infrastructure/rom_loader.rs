@@ -65,20 +65,23 @@ fn save_path_for_rom(path: &Path) -> PathBuf {
 mod tests {
     use super::{load_rom, save_battery_ram, save_path_for_rom};
     use crate::domain::Cartridge;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn unique_path(name: &str) -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let filename = format!("{}_{}_{}", name, std::process::id(), nanos);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let filename = format!("{}_{}_{}", name, std::process::id(), id);
         std::env::temp_dir().join(filename)
+    }
+
+    fn unique_rom_path() -> std::path::PathBuf {
+        unique_path("craterboy_rom").with_extension("gb")
     }
 
     #[test]
     fn load_rom_reads_existing_save() {
-        let rom_path = unique_path("craterboy_rom.gb");
+        let rom_path = unique_rom_path();
         let save_path = save_path_for_rom(&rom_path);
         let mut rom = vec![0; 0x0150];
         rom[0x0147] = 0x09;
@@ -97,7 +100,7 @@ mod tests {
 
     #[test]
     fn save_battery_ram_writes_save_file() {
-        let rom_path = unique_path("craterboy_rom.gb");
+        let rom_path = unique_rom_path();
         let mut rom = vec![0; 0x0150];
         rom[0x0147] = 0x09;
         rom[0x0149] = 0x02;
