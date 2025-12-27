@@ -35,8 +35,8 @@ impl Bus {
 #[cfg(test)]
 mod tests {
     use super::Bus;
-    use crate::domain::cartridge::ROM_BANK_SIZE;
     use crate::domain::Cartridge;
+    use crate::domain::cartridge::ROM_BANK_SIZE;
 
     #[test]
     fn bus_reads_from_selected_rom_bank() {
