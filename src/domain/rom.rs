@@ -450,19 +450,6 @@ impl RomHeader {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Rom {
-    pub bytes: Vec<u8>,
-    pub header: RomHeader,
-}
-
-impl Rom {
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, RomHeaderError> {
-        let header = RomHeader::parse(&bytes)?;
-        Ok(Self { bytes, header })
-    }
-}
-
 fn parse_title(bytes: &[u8]) -> String {
     let end = bytes
         .iter()

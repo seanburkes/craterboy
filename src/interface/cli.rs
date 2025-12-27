@@ -1,7 +1,7 @@
 use crate::application::app;
 use crate::domain::{
-    CartridgeType, CgbFlag, Destination, Licensee, RamSize, Rom, RomHeader, RomSize, SgbFlag,
-    compute_global_checksum, compute_header_checksum, nintendo_logo_matches,
+    Cartridge, CartridgeType, CgbFlag, Destination, Licensee, RamSize, RomHeader, RomSize,
+    SgbFlag, compute_global_checksum, compute_header_checksum, nintendo_logo_matches,
 };
 use crate::infrastructure::rom_loader::RomLoadError;
 
@@ -39,7 +39,7 @@ pub fn run() {
     };
 
     match app::load_rom(&path) {
-        Ok(rom) => print_report(&path, &rom, verbose),
+        Ok(cartridge) => print_report(&path, &cartridge, verbose),
         Err(err) => {
             report_load_error(&path, err);
             std::process::exit(1);
@@ -47,19 +47,22 @@ pub fn run() {
     }
 }
 
-fn print_report(path: &str, rom: &Rom, verbose: bool) {
+fn print_report(path: &str, cartridge: &Cartridge, verbose: bool) {
     println!("ROM: {}", path);
     println!(
         "File Size: {} bytes ({} KiB)",
-        rom.bytes.len(),
-        rom.bytes.len() / 1024
+        cartridge.bytes.len(),
+        cartridge.bytes.len() / 1024
     );
-    println!("ROM ID (fnv1a64): {:016X}", fnv1a64(&rom.bytes));
-    print_header(&rom.header);
-    print_checks(rom);
+    println!(
+        "ROM ID (fnv1a64): {:016X}",
+        fnv1a64(&cartridge.bytes)
+    );
+    print_header(&cartridge.header);
+    print_checks(cartridge);
 
     if verbose {
-        print_header_bytes(&rom.bytes);
+        print_header_bytes(&cartridge.bytes);
     }
 }
 
@@ -107,23 +110,23 @@ fn sgb_flag_label(flag: SgbFlag) -> String {
     }
 }
 
-fn print_checks(rom: &Rom) {
+fn print_checks(cartridge: &Cartridge) {
     let mut warnings = Vec::new();
 
-    let logo_ok = nintendo_logo_matches(&rom.bytes);
+    let logo_ok = nintendo_logo_matches(&cartridge.bytes);
     println!("Nintendo Logo: {}", check_label(logo_ok));
     if logo_ok == Some(false) {
         warnings.push("Nintendo logo check failed".to_string());
     }
 
-    let computed_header = compute_header_checksum(&rom.bytes);
+    let computed_header = compute_header_checksum(&cartridge.bytes);
     match computed_header {
         Some(computed) => {
-            let ok = computed == rom.header.header_checksum;
+            let ok = computed == cartridge.header.header_checksum;
             println!(
                 "Header Checksum: {} (expected 0x{:02X}, computed 0x{:02X})",
                 if ok { "OK" } else { "FAIL" },
-                rom.header.header_checksum,
+                cartridge.header.header_checksum,
                 computed
             );
             if !ok {
@@ -135,14 +138,14 @@ fn print_checks(rom: &Rom) {
         }
     }
 
-    let computed_global = compute_global_checksum(&rom.bytes);
+    let computed_global = compute_global_checksum(&cartridge.bytes);
     match computed_global {
         Some(computed) => {
-            let ok = computed == rom.header.global_checksum;
+            let ok = computed == cartridge.header.global_checksum;
             println!(
                 "Global Checksum: {} (expected 0x{:04X}, computed 0x{:04X})",
                 if ok { "OK" } else { "FAIL" },
-                rom.header.global_checksum,
+                cartridge.header.global_checksum,
                 computed
             );
             if !ok {
@@ -154,51 +157,51 @@ fn print_checks(rom: &Rom) {
         }
     }
 
-    let expected_size = rom.header.rom_size.bytes();
+    let expected_size = cartridge.header.rom_size.bytes();
     match expected_size {
         Some(expected) => {
-            if expected == rom.bytes.len() {
+            if expected == cartridge.bytes.len() {
                 println!(
                     "ROM Size Check: OK (expected {} bytes, file has {} bytes)",
                     expected,
-                    rom.bytes.len()
+                    cartridge.bytes.len()
                 );
             } else {
                 println!(
                     "ROM Size Check: FAIL (expected {} bytes, file has {} bytes)",
                     expected,
-                    rom.bytes.len()
+                    cartridge.bytes.len()
                 );
                 warnings.push(format!(
                     "ROM size mismatch: header expects {} bytes, file has {} bytes",
                     expected,
-                    rom.bytes.len()
+                    cartridge.bytes.len()
                 ));
             }
         }
         None => {
             println!(
                 "ROM Size Check: Unknown (code 0x{:02X})",
-                rom.header.rom_size.code()
+                cartridge.header.rom_size.code()
             );
             warnings.push("Unknown ROM size code".to_string());
         }
     }
 
-    if matches!(rom.header.ram_size, RamSize::Unknown(_)) {
+    if matches!(cartridge.header.ram_size, RamSize::Unknown(_)) {
         warnings.push("Unknown RAM size code".to_string());
     }
 
-    if matches!(rom.header.destination, Destination::Unknown(_)) {
+    if matches!(cartridge.header.destination, Destination::Unknown(_)) {
         warnings.push("Unknown destination code".to_string());
     }
 
-    if matches!(rom.header.cartridge_type, CartridgeType::Unknown(_)) {
+    if matches!(cartridge.header.cartridge_type, CartridgeType::Unknown(_)) {
         warnings.push("Unknown cartridge type".to_string());
-    } else if !rom.header.cartridge_type.is_supported() {
+    } else if !cartridge.header.cartridge_type.is_supported() {
         warnings.push(format!(
             "Cartridge type not supported yet: {}",
-            cartridge_type_label(rom.header.cartridge_type)
+            cartridge_type_label(cartridge.header.cartridge_type)
         ));
     }
 

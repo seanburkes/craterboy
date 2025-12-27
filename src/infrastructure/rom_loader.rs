@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::domain::{Rom, RomHeaderError};
+use crate::domain::{Cartridge, RomHeaderError};
 
 #[derive(Debug)]
 pub enum RomLoadError {
@@ -20,7 +20,7 @@ impl From<RomHeaderError> for RomLoadError {
     }
 }
 
-pub fn load_rom(path: impl AsRef<Path>) -> Result<Rom, RomLoadError> {
+pub fn load_rom(path: impl AsRef<Path>) -> Result<Cartridge, RomLoadError> {
     let bytes = std::fs::read(path)?;
-    Ok(Rom::from_bytes(bytes)?)
+    Ok(Cartridge::from_bytes(bytes)?)
 }
