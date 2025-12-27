@@ -2,7 +2,7 @@ pub mod cartridge;
 pub mod emulator;
 pub mod rom;
 
-pub use cartridge::{Cartridge, RomBankView};
+pub use cartridge::{Cartridge, RomBankMapping, RomBankView};
 pub use emulator::Emulator;
 pub use rom::{
     CartridgeType, CgbFlag, Destination, Licensee, RamSize, RomHeader, RomHeaderError, RomSize,
