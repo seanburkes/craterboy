@@ -33,6 +33,7 @@ mod tests {
         bytes[..ROM_BANK_SIZE].fill(0x10);
         bytes[ROM_BANK_SIZE..ROM_BANK_SIZE * 2].fill(0x20);
         bytes[ROM_BANK_SIZE * 2..].fill(0x30);
+        bytes[0x0147] = 0x00;
 
         let cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
         let bus = Bus::new(cartridge).expect("bus");
