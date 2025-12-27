@@ -71,6 +71,7 @@ impl<'a> RomBankView<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct RomBankMapping<'a> {
     bytes: &'a [u8],
+    fixed_bank: usize,
     switchable_bank: usize,
 }
 
@@ -78,6 +79,7 @@ impl<'a> RomBankMapping<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
         Self {
             bytes,
+            fixed_bank: 0,
             switchable_bank: 1,
         }
     }
@@ -85,12 +87,29 @@ impl<'a> RomBankMapping<'a> {
     pub fn with_switchable_bank(bytes: &'a [u8], switchable_bank: usize) -> Self {
         Self {
             bytes,
+            fixed_bank: 0,
             switchable_bank,
         }
     }
 
+    pub fn with_banks(bytes: &'a [u8], fixed_bank: usize, switchable_bank: usize) -> Self {
+        Self {
+            bytes,
+            fixed_bank,
+            switchable_bank,
+        }
+    }
+
+    pub fn fixed_bank(&self) -> usize {
+        self.fixed_bank
+    }
+
     pub fn switchable_bank(&self) -> usize {
         self.switchable_bank
+    }
+
+    pub fn set_fixed_bank(&mut self, bank: usize) {
+        self.fixed_bank = bank;
     }
 
     pub fn set_switchable_bank(&mut self, bank: usize) {
@@ -100,7 +119,10 @@ impl<'a> RomBankMapping<'a> {
     pub fn read(&self, addr: u16) -> u8 {
         let addr = addr as usize;
         match addr {
-            ROM_FIXED_START..=ROM_FIXED_END => self.read_at(addr),
+            ROM_FIXED_START..=ROM_FIXED_END => {
+                let offset = addr - ROM_FIXED_START;
+                self.read_bank(self.fixed_bank, offset)
+            }
             ROM_SWITCH_START..=ROM_SWITCH_END => {
                 let offset = addr - ROM_SWITCH_START;
                 self.read_bank(self.switchable_bank, offset)

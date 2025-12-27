@@ -19,6 +19,10 @@ impl Bus {
     pub fn read8(&self, addr: u16) -> u8 {
         self.mbc.read8(&self.cartridge, addr)
     }
+
+    pub fn write8(&mut self, addr: u16, value: u8) {
+        self.mbc.write8(addr, value);
+    }
 }
 
 #[cfg(test)]
