@@ -14,6 +14,7 @@ pub enum MbcError {
 }
 
 #[derive(Debug, Clone)]
+#[allow(private_interfaces)]
 pub enum Mbc {
     RomOnly,
     Mbc1(Mbc1),
