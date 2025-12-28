@@ -612,7 +612,10 @@ fn write_ext_ram(cartridge: &mut Cartridge, bank: usize, addr: u16, value: u8) {
     let offset = addr as usize - EXT_RAM_START as usize;
     let index = bank * EXT_RAM_BANK_SIZE + offset;
     if let Some(byte) = cartridge.ext_ram.get_mut(index) {
-        *byte = value;
+        if *byte != value {
+            *byte = value;
+            cartridge.mark_ram_dirty();
+        }
     }
 }
 
@@ -637,7 +640,11 @@ fn write_mbc2_ram(cartridge: &mut Cartridge, addr: u16, value: u8) {
     }
     let offset = (addr as usize - EXT_RAM_START as usize) & 0x01FF;
     if let Some(byte) = cartridge.ext_ram.get_mut(offset) {
-        *byte = value & 0x0F;
+        let value = value & 0x0F;
+        if *byte != value {
+            *byte = value;
+            cartridge.mark_ram_dirty();
+        }
     }
 }
 
@@ -724,10 +731,12 @@ mod tests {
 
         mbc.write8(&mut cartridge, 0xA000, 0x55);
         assert_eq!(mbc.read8(&cartridge, 0xA000), 0xFF);
+        assert!(!cartridge.is_ram_dirty());
 
         mbc.write8(&mut cartridge, 0x0000, 0x0A);
         mbc.write8(&mut cartridge, 0xA000, 0x55);
         assert_eq!(mbc.read8(&cartridge, 0xA000), 0x55);
+        assert!(cartridge.is_ram_dirty());
 
         mbc.write8(&mut cartridge, 0x0000, 0x00);
         assert_eq!(mbc.read8(&cartridge, 0xA000), 0xFF);

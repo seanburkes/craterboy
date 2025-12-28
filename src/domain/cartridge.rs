@@ -12,6 +12,7 @@ pub struct Cartridge {
     pub bytes: Vec<u8>,
     pub header: RomHeader,
     pub ext_ram: Vec<u8>,
+    ram_dirty: bool,
 }
 
 impl Cartridge {
@@ -22,6 +23,7 @@ impl Cartridge {
             bytes,
             header,
             ext_ram,
+            ram_dirty: false,
         })
     }
 
@@ -54,12 +56,26 @@ impl Cartridge {
     }
 
     pub fn ram_mut(&mut self) -> &mut [u8] {
+        self.ram_dirty = true;
         &mut self.ext_ram
     }
 
     pub fn load_ram(&mut self, data: &[u8]) {
         let len = self.ext_ram.len().min(data.len());
         self.ext_ram[..len].copy_from_slice(&data[..len]);
+        self.ram_dirty = false;
+    }
+
+    pub fn is_ram_dirty(&self) -> bool {
+        self.ram_dirty
+    }
+
+    pub fn clear_ram_dirty(&mut self) {
+        self.ram_dirty = false;
+    }
+
+    pub fn mark_ram_dirty(&mut self) {
+        self.ram_dirty = true;
     }
 }
 
