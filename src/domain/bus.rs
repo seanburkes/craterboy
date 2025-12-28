@@ -200,8 +200,7 @@ impl Bus {
 #[cfg(test)]
 mod tests {
     use super::{
-        BOOT_ROM_SIZE, Bus, IF_TIMER, REG_DIV, REG_IF, REG_LY, REG_STAT, REG_TAC, REG_TIMA,
-        REG_TMA,
+        BOOT_ROM_SIZE, Bus, IF_TIMER, REG_DIV, REG_IF, REG_LY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA,
     };
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
