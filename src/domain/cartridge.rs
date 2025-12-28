@@ -17,7 +17,7 @@ pub struct Cartridge {
 impl Cartridge {
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, RomHeaderError> {
         let header = RomHeader::parse(&bytes)?;
-        let ext_ram = vec![0; header.ram_size.bytes().unwrap_or(0)];
+        let ext_ram = vec![0; ext_ram_size(header.cartridge_type, header.ram_size)];
         Ok(Self {
             bytes,
             header,
@@ -60,6 +60,13 @@ impl Cartridge {
     pub fn load_ram(&mut self, data: &[u8]) {
         let len = self.ext_ram.len().min(data.len());
         self.ext_ram[..len].copy_from_slice(&data[..len]);
+    }
+}
+
+fn ext_ram_size(cartridge_type: super::rom::CartridgeType, ram_size: super::rom::RamSize) -> usize {
+    match cartridge_type {
+        super::rom::CartridgeType::Mbc2 | super::rom::CartridgeType::Mbc2Battery => 512,
+        _ => ram_size.bytes().unwrap_or(0),
     }
 }
 
