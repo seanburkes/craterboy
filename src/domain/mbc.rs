@@ -1,5 +1,6 @@
 use super::cartridge::ROM_BANK_SIZE;
 use super::{Cartridge, CartridgeType, RomBankMapping};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const EXT_RAM_START: u16 = 0xA000;
 const EXT_RAM_END: u16 = 0xBFFF;
@@ -17,6 +18,12 @@ pub enum MbcError {
 #[derive(Debug, Clone)]
 pub struct Mbc {
     kind: MbcKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtcMode {
+    Deterministic,
+    HostSync,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +84,12 @@ impl Mbc {
     pub fn tick(&mut self, cycles: u32) {
         if let MbcKind::Mbc3(mbc3) = &mut self.kind {
             mbc3.tick(cycles);
+        }
+    }
+
+    pub fn set_rtc_mode(&mut self, mode: RtcMode) {
+        if let MbcKind::Mbc3(mbc3) = &mut self.kind {
+            mbc3.set_rtc_mode(mode);
         }
     }
 }
@@ -272,46 +285,12 @@ impl Rtc {
             RtcRegister::Minutes => self.minutes = value,
             RtcRegister::Hours => self.hours = value,
             RtcRegister::DayLow => self.day_low = value,
-            RtcRegister::DayHigh => self.day_high = value,
+            RtcRegister::DayHigh => self.day_high = value & 0xC1,
         }
     }
 
     fn tick_seconds(&mut self, seconds: u32) {
-        if self.day_high & 0x40 != 0 {
-            return;
-        }
-
-        let mut remaining = seconds;
-        while remaining > 0 {
-            remaining -= 1;
-            self.increment_one_second();
-        }
-    }
-
-    fn increment_one_second(&mut self) {
-        self.seconds = self.seconds.wrapping_add(1);
-        if self.seconds < 60 {
-            return;
-        }
-        self.seconds = 0;
-        self.minutes = self.minutes.wrapping_add(1);
-        if self.minutes < 60 {
-            return;
-        }
-        self.minutes = 0;
-        self.hours = self.hours.wrapping_add(1);
-        if self.hours < 24 {
-            return;
-        }
-        self.hours = 0;
-
-        let day = self.day_counter();
-        if day == 0x1FF {
-            self.set_day_counter(0);
-            self.day_high |= 0x80;
-        } else {
-            self.set_day_counter(day + 1);
-        }
+        self.add_seconds(u64::from(seconds));
     }
 
     fn day_counter(&self) -> u16 {
@@ -319,9 +298,53 @@ impl Rtc {
         u16::from(self.day_low) | (high << 8)
     }
 
-    fn set_day_counter(&mut self, day: u16) {
-        self.day_low = day as u8;
-        self.day_high = (self.day_high & 0xFE) | ((day >> 8) as u8 & 0x01);
+    fn add_seconds(&mut self, seconds: u64) {
+        if self.day_high & 0x40 != 0 {
+            return;
+        }
+
+        let day = self.day_counter() as u64;
+        let base_seconds = day * 86_400
+            + u64::from(self.hours) * 3600
+            + u64::from(self.minutes) * 60
+            + u64::from(self.seconds);
+        let total = base_seconds + seconds;
+
+        let days = total / 86_400;
+        let remainder = total % 86_400;
+        let hours = (remainder / 3600) as u8;
+        let minutes = ((remainder / 60) % 60) as u8;
+        let secs = (remainder % 60) as u8;
+
+        let mut carry = self.day_high & 0x80;
+        if carry == 0 && days >= 512 {
+            carry = 0x80;
+        }
+
+        let day_mod = (days % 512) as u16;
+        let halt = self.day_high & 0x40;
+        self.seconds = secs;
+        self.minutes = minutes;
+        self.hours = hours;
+        self.day_low = (day_mod & 0xFF) as u8;
+        self.day_high = halt | carry | ((day_mod >> 8) as u8 & 0x01);
+    }
+
+    fn from_unix_seconds(seconds: u64) -> Self {
+        let days = seconds / 86_400;
+        let remainder = seconds % 86_400;
+        let hours = (remainder / 3600) as u8;
+        let minutes = ((remainder / 60) % 60) as u8;
+        let secs = (remainder % 60) as u8;
+        let day_mod = (days % 512) as u16;
+        let carry = if days >= 512 { 0x80 } else { 0x00 };
+        Self {
+            seconds: secs,
+            minutes,
+            hours,
+            day_low: (day_mod & 0xFF) as u8,
+            day_high: carry | ((day_mod >> 8) as u8 & 0x01),
+        }
     }
 }
 
@@ -332,6 +355,8 @@ struct Mbc3 {
     rtc_reg: Option<RtcRegister>,
     ram_enabled: bool,
     latch_pending: bool,
+    rtc_mode: RtcMode,
+    rtc_host_base: Option<SystemTime>,
     rtc_counter: u32,
     rtc: Rtc,
     rtc_latched: Rtc,
@@ -353,6 +378,8 @@ impl Mbc3 {
             rtc_reg: None,
             ram_enabled: false,
             latch_pending: false,
+            rtc_mode: RtcMode::Deterministic,
+            rtc_host_base: None,
             rtc_counter: 0,
             rtc,
             rtc_latched: rtc,
@@ -375,7 +402,7 @@ impl Mbc3 {
                     if self.latched {
                         self.rtc_latched.read(reg)
                     } else {
-                        self.rtc.read(reg)
+                        self.current_rtc().read(reg)
                     }
                 } else {
                     read_ext_ram(cartridge, self.ram_bank as usize, addr)
@@ -410,7 +437,7 @@ impl Mbc3 {
                 if value == 0x00 {
                     self.latch_pending = true;
                 } else if value == 0x01 && self.latch_pending {
-                    self.rtc_latched = self.rtc;
+                    self.rtc_latched = self.current_rtc();
                     self.latched = true;
                     self.latch_pending = false;
                 } else {
@@ -423,6 +450,9 @@ impl Mbc3 {
                 }
                 if let Some(reg) = self.rtc_reg {
                     self.rtc.write(reg, value);
+                    if self.rtc_mode == RtcMode::HostSync {
+                        self.rtc_host_base = Some(SystemTime::now());
+                    }
                 } else {
                     write_ext_ram(cartridge, self.ram_bank as usize, addr, value);
                 }
@@ -432,10 +462,57 @@ impl Mbc3 {
     }
 
     fn tick(&mut self, cycles: u32) {
+        if self.rtc_mode != RtcMode::Deterministic {
+            return;
+        }
         self.rtc_counter = self.rtc_counter.wrapping_add(cycles);
         while self.rtc_counter >= CYCLES_PER_SECOND {
             self.rtc_counter -= CYCLES_PER_SECOND;
             self.rtc.tick_seconds(1);
+        }
+    }
+
+    fn set_rtc_mode(&mut self, mode: RtcMode) {
+        if self.rtc_mode == mode {
+            return;
+        }
+        match mode {
+            RtcMode::Deterministic => {
+                self.rtc = self.current_rtc();
+                self.rtc_host_base = None;
+                self.rtc_counter = 0;
+                self.rtc_mode = mode;
+            }
+            RtcMode::HostSync => {
+                let now = SystemTime::now();
+                let seconds = now
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(Duration::ZERO)
+                    .as_secs();
+                self.rtc = Rtc::from_unix_seconds(seconds);
+                self.rtc_host_base = Some(now);
+                self.rtc_counter = 0;
+                self.rtc_mode = mode;
+            }
+        }
+        self.rtc_latched = self.rtc;
+        self.latched = false;
+    }
+
+    fn current_rtc(&self) -> Rtc {
+        match self.rtc_mode {
+            RtcMode::Deterministic => self.rtc,
+            RtcMode::HostSync => {
+                let base = self.rtc;
+                let base_time = self.rtc_host_base.unwrap_or_else(SystemTime::now);
+                let elapsed = SystemTime::now()
+                    .duration_since(base_time)
+                    .unwrap_or(Duration::ZERO)
+                    .as_secs();
+                let mut rtc = base;
+                rtc.add_seconds(elapsed);
+                rtc
+            }
         }
     }
 }
@@ -594,7 +671,7 @@ fn normalize_switchable_bank(bank: usize, bank_count: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{CYCLES_PER_SECOND, Mbc, bank_count};
+    use super::{CYCLES_PER_SECOND, Mbc, RtcMode, bank_count};
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
 
@@ -732,6 +809,7 @@ mod tests {
 
         mbc.write8(&mut cartridge, 0x0000, 0x0A);
         mbc.write8(&mut cartridge, 0x4000, 0x08);
+        mbc.set_rtc_mode(RtcMode::Deterministic);
         mbc.tick(CYCLES_PER_SECOND);
 
         assert_eq!(mbc.read8(&cartridge, 0xA000), 1);

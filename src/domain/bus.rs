@@ -1,4 +1,4 @@
-use super::{Cartridge, Mbc, MbcError};
+use super::{Cartridge, Mbc, MbcError, RtcMode};
 
 const BOOT_ROM_SIZE: usize = 0x100;
 const VRAM_SIZE: usize = 0x2000;
@@ -132,6 +132,10 @@ impl Bus {
         self.step_div(cycles);
         self.step_timer(cycles);
         self.mbc.tick(cycles);
+    }
+
+    pub fn set_rtc_mode(&mut self, mode: RtcMode) {
+        self.mbc.set_rtc_mode(mode);
     }
 }
 
