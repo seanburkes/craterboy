@@ -14,8 +14,12 @@ pub enum MbcError {
 }
 
 #[derive(Debug, Clone)]
-#[allow(private_interfaces)]
-pub enum Mbc {
+pub struct Mbc {
+    kind: MbcKind,
+}
+
+#[derive(Debug, Clone)]
+enum MbcKind {
     RomOnly,
     Mbc1(Mbc1),
     Mbc2(Mbc2),
@@ -25,46 +29,47 @@ pub enum Mbc {
 
 impl Mbc {
     pub fn new(cartridge: &Cartridge) -> Result<Self, MbcError> {
-        match cartridge.header.cartridge_type {
+        let kind = match cartridge.header.cartridge_type {
             CartridgeType::RomOnly | CartridgeType::RomRam | CartridgeType::RomRamBattery => {
-                Ok(Self::RomOnly)
+                MbcKind::RomOnly
             }
             CartridgeType::Mbc1 | CartridgeType::Mbc1Ram | CartridgeType::Mbc1RamBattery => {
-                Ok(Self::Mbc1(Mbc1::new()))
+                MbcKind::Mbc1(Mbc1::new())
             }
-            CartridgeType::Mbc2 | CartridgeType::Mbc2Battery => Ok(Self::Mbc2(Mbc2::new())),
+            CartridgeType::Mbc2 | CartridgeType::Mbc2Battery => MbcKind::Mbc2(Mbc2::new()),
             CartridgeType::Mbc3
             | CartridgeType::Mbc3Ram
             | CartridgeType::Mbc3RamBattery
             | CartridgeType::Mbc3TimerBattery
-            | CartridgeType::Mbc3TimerRamBattery => Ok(Self::Mbc3(Mbc3::new())),
+            | CartridgeType::Mbc3TimerRamBattery => MbcKind::Mbc3(Mbc3::new()),
             CartridgeType::Mbc5
             | CartridgeType::Mbc5Ram
             | CartridgeType::Mbc5RamBattery
             | CartridgeType::Mbc5Rumble
             | CartridgeType::Mbc5RumbleRam
-            | CartridgeType::Mbc5RumbleRamBattery => Ok(Self::Mbc5(Mbc5::new())),
-            other => Err(MbcError::UnsupportedCartridgeType(other)),
-        }
+            | CartridgeType::Mbc5RumbleRamBattery => MbcKind::Mbc5(Mbc5::new()),
+            other => return Err(MbcError::UnsupportedCartridgeType(other)),
+        };
+        Ok(Self { kind })
     }
 
     pub fn read8(&self, cartridge: &Cartridge, addr: u16) -> u8 {
-        match self {
-            Self::RomOnly => read_rom_only(cartridge, addr),
-            Self::Mbc1(mbc1) => mbc1.read8(cartridge, addr),
-            Self::Mbc2(mbc2) => mbc2.read8(cartridge, addr),
-            Self::Mbc3(mbc3) => mbc3.read8(cartridge, addr),
-            Self::Mbc5(mbc5) => mbc5.read8(cartridge, addr),
+        match &self.kind {
+            MbcKind::RomOnly => read_rom_only(cartridge, addr),
+            MbcKind::Mbc1(mbc1) => mbc1.read8(cartridge, addr),
+            MbcKind::Mbc2(mbc2) => mbc2.read8(cartridge, addr),
+            MbcKind::Mbc3(mbc3) => mbc3.read8(cartridge, addr),
+            MbcKind::Mbc5(mbc5) => mbc5.read8(cartridge, addr),
         }
     }
 
     pub fn write8(&mut self, cartridge: &mut Cartridge, addr: u16, value: u8) {
-        match self {
-            Self::RomOnly => write_rom_only(cartridge, addr, value),
-            Self::Mbc1(mbc1) => mbc1.write8(cartridge, addr, value),
-            Self::Mbc2(mbc2) => mbc2.write8(cartridge, addr, value),
-            Self::Mbc3(mbc3) => mbc3.write8(cartridge, addr, value),
-            Self::Mbc5(mbc5) => mbc5.write8(cartridge, addr, value),
+        match &mut self.kind {
+            MbcKind::RomOnly => write_rom_only(cartridge, addr, value),
+            MbcKind::Mbc1(mbc1) => mbc1.write8(cartridge, addr, value),
+            MbcKind::Mbc2(mbc2) => mbc2.write8(cartridge, addr, value),
+            MbcKind::Mbc3(mbc3) => mbc3.write8(cartridge, addr, value),
+            MbcKind::Mbc5(mbc5) => mbc5.write8(cartridge, addr, value),
         }
     }
 }
