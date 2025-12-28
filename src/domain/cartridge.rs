@@ -166,6 +166,11 @@ impl<'a> RomBankMapping<'a> {
     }
 
     fn read_bank(&self, bank: usize, offset: usize) -> u8 {
+        let bank_count = bank_count_from_len(self.bytes.len());
+        if bank_count == 0 {
+            return OPEN_BUS;
+        }
+        let bank = bank % bank_count;
         let base = match bank.checked_mul(ROM_BANK_SIZE) {
             Some(base) => base,
             None => return OPEN_BUS,
@@ -179,6 +184,14 @@ impl<'a> RomBankMapping<'a> {
 
     fn read_at(&self, index: usize) -> u8 {
         self.bytes.get(index).copied().unwrap_or(OPEN_BUS)
+    }
+}
+
+fn bank_count_from_len(len: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        (len + ROM_BANK_SIZE - 1) / ROM_BANK_SIZE
     }
 }
 
@@ -207,6 +220,27 @@ mod tests {
         assert_eq!(banks.bank_count(), 2);
         assert_eq!(banks.bank(0).expect("bank 0").len(), ROM_BANK_SIZE);
         assert_eq!(banks.bank(1).expect("bank 1").len(), 1);
+    }
+
+    #[test]
+    fn rom_mapping_mirrors_single_bank_for_switchable_window() {
+        let mut bytes = vec![0; ROM_BANK_SIZE];
+        bytes.fill(0x5A);
+        let cart = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mapping = cart.rom_mapping();
+
+        assert_eq!(mapping.read(0x4000), 0x5A);
+    }
+
+    #[test]
+    fn rom_mapping_wraps_invalid_bank_numbers() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[..ROM_BANK_SIZE].fill(0x11);
+        bytes[ROM_BANK_SIZE..].fill(0x22);
+        let cart = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mapping = super::RomBankMapping::with_banks(&cart.bytes, 0, 3);
+
+        assert_eq!(mapping.read(0x4000), 0x22);
     }
 
     #[test]
