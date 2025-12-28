@@ -331,20 +331,18 @@ impl Mbc3 {
                 let bank = value & 0x7F;
                 self.rom_bank = if bank == 0 { 1 } else { bank };
             }
-            0x4000..=0x5FFF => {
-                match value {
-                    0x00..=0x03 => {
-                        self.ram_bank = value & 0x03;
-                        self.rtc_reg = None;
-                    }
-                    0x08 => self.rtc_reg = Some(RtcRegister::Seconds),
-                    0x09 => self.rtc_reg = Some(RtcRegister::Minutes),
-                    0x0A => self.rtc_reg = Some(RtcRegister::Hours),
-                    0x0B => self.rtc_reg = Some(RtcRegister::DayLow),
-                    0x0C => self.rtc_reg = Some(RtcRegister::DayHigh),
-                    _ => {}
+            0x4000..=0x5FFF => match value {
+                0x00..=0x03 => {
+                    self.ram_bank = value & 0x03;
+                    self.rtc_reg = None;
                 }
-            }
+                0x08 => self.rtc_reg = Some(RtcRegister::Seconds),
+                0x09 => self.rtc_reg = Some(RtcRegister::Minutes),
+                0x0A => self.rtc_reg = Some(RtcRegister::Hours),
+                0x0B => self.rtc_reg = Some(RtcRegister::DayLow),
+                0x0C => self.rtc_reg = Some(RtcRegister::DayHigh),
+                _ => {}
+            },
             0x6000..=0x7FFF => {
                 if value == 0x00 {
                     self.latch_pending = true;
