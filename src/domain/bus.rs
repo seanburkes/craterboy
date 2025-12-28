@@ -15,6 +15,7 @@ const REG_TAC: u16 = 0xFF07;
 const REG_IF: u16 = 0xFF0F;
 const REG_STAT: u16 = 0xFF41;
 const REG_LY: u16 = 0xFF44;
+const IF_TIMER: u8 = 0x04;
 
 #[derive(Debug)]
 pub struct Bus {
@@ -28,9 +29,11 @@ pub struct Bus {
     io: Vec<u8>,
     hram: Vec<u8>,
     div: u8,
+    div_counter: u16,
     tima: u8,
     tma: u8,
     tac: u8,
+    tima_counter: u32,
     ly: u8,
     stat: u8,
     interrupt_flag: u8,
@@ -59,9 +62,11 @@ impl Bus {
             io: vec![0; IO_SIZE],
             hram: vec![0; HRAM_SIZE],
             div: 0,
+            div_counter: 0,
             tima: 0,
             tma: 0,
             tac: 0,
+            tima_counter: 0,
             ly: 0,
             stat: 0,
             interrupt_flag: 0,
@@ -122,6 +127,11 @@ impl Bus {
             0xFFFF => self.interrupt_enable = value,
         }
     }
+
+    pub fn step(&mut self, cycles: u32) {
+        self.step_div(cycles);
+        self.step_timer(cycles);
+    }
 }
 
 impl Bus {
@@ -140,7 +150,10 @@ impl Bus {
 
     fn write_io(&mut self, addr: u16, value: u8) {
         match addr {
-            REG_DIV => self.div = 0,
+            REG_DIV => {
+                self.div = 0;
+                self.div_counter = 0;
+            }
             REG_TIMA => self.tima = value,
             REG_TMA => self.tma = value,
             REG_TAC => self.tac = value,
@@ -150,12 +163,45 @@ impl Bus {
             _ => self.io[(addr as usize - 0xFF00) % IO_SIZE] = value,
         }
     }
+
+    fn step_div(&mut self, cycles: u32) {
+        let new = self.div_counter.wrapping_add(cycles as u16);
+        self.div_counter = new;
+        self.div = (new >> 8) as u8;
+    }
+
+    fn step_timer(&mut self, cycles: u32) {
+        if self.tac & 0x04 == 0 {
+            return;
+        }
+
+        let period = match self.tac & 0x03 {
+            0x00 => 1024,
+            0x01 => 16,
+            0x02 => 64,
+            0x03 => 256,
+            _ => 1024,
+        };
+
+        self.tima_counter += cycles;
+        while self.tima_counter >= period {
+            self.tima_counter -= period;
+            let (next, overflow) = self.tima.overflowing_add(1);
+            if overflow {
+                self.tima = self.tma;
+                self.interrupt_flag |= IF_TIMER;
+            } else {
+                self.tima = next;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BOOT_ROM_SIZE, Bus, REG_DIV, REG_IF, REG_LY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA,
+        BOOT_ROM_SIZE, Bus, IF_TIMER, REG_DIV, REG_IF, REG_LY, REG_STAT, REG_TAC, REG_TIMA,
+        REG_TMA,
     };
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
@@ -241,5 +287,23 @@ mod tests {
         bus.write8(REG_LY, 0x55);
         assert_eq!(bus.read8(REG_DIV), 0x00);
         assert_eq!(bus.read8(REG_LY), 0x00);
+    }
+
+    #[test]
+    fn bus_timer_steps_and_sets_interrupt() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(REG_TAC, 0x05);
+        bus.step(16);
+        assert_eq!(bus.read8(REG_TIMA), 1);
+
+        bus.write8(REG_TIMA, 0xFF);
+        bus.write8(REG_TMA, 0xAA);
+        bus.step(16);
+        assert_eq!(bus.read8(REG_TIMA), 0xAA);
+        assert_eq!(bus.read8(REG_IF) & IF_TIMER, IF_TIMER);
     }
 }
