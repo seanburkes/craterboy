@@ -8,6 +8,14 @@ const IO_SIZE: usize = 0x80;
 const HRAM_SIZE: usize = 0x7F;
 const OPEN_BUS: u8 = 0xFF;
 
+const REG_DIV: u16 = 0xFF04;
+const REG_TIMA: u16 = 0xFF05;
+const REG_TMA: u16 = 0xFF06;
+const REG_TAC: u16 = 0xFF07;
+const REG_IF: u16 = 0xFF0F;
+const REG_STAT: u16 = 0xFF41;
+const REG_LY: u16 = 0xFF44;
+
 #[derive(Debug)]
 pub struct Bus {
     cartridge: Cartridge,
@@ -19,6 +27,13 @@ pub struct Bus {
     oam: Vec<u8>,
     io: Vec<u8>,
     hram: Vec<u8>,
+    div: u8,
+    tima: u8,
+    tma: u8,
+    tac: u8,
+    ly: u8,
+    stat: u8,
+    interrupt_flag: u8,
     interrupt_enable: u8,
 }
 
@@ -43,6 +58,13 @@ impl Bus {
             oam: vec![0; OAM_SIZE],
             io: vec![0; IO_SIZE],
             hram: vec![0; HRAM_SIZE],
+            div: 0,
+            tima: 0,
+            tma: 0,
+            tac: 0,
+            ly: 0,
+            stat: 0,
+            interrupt_flag: 0,
             interrupt_enable: 0,
         })
     }
@@ -76,7 +98,7 @@ impl Bus {
             0xE000..=0xFDFF => self.wram[(addr as usize - 0xE000) % WRAM_SIZE],
             0xFE00..=0xFE9F => self.oam[(addr as usize - 0xFE00) % OAM_SIZE],
             0xFEA0..=0xFEFF => OPEN_BUS,
-            0xFF00..=0xFF7F => self.io[(addr as usize - 0xFF00) % IO_SIZE],
+            0xFF00..=0xFF7F => self.read_io(addr),
             0xFF80..=0xFFFE => self.hram[(addr as usize - 0xFF80) % HRAM_SIZE],
             0xFFFF => self.interrupt_enable,
         }
@@ -95,16 +117,46 @@ impl Bus {
             0xE000..=0xFDFF => self.wram[(addr as usize - 0xE000) % WRAM_SIZE] = value,
             0xFE00..=0xFE9F => self.oam[(addr as usize - 0xFE00) % OAM_SIZE] = value,
             0xFEA0..=0xFEFF => {}
-            0xFF00..=0xFF7F => self.io[(addr as usize - 0xFF00) % IO_SIZE] = value,
+            0xFF00..=0xFF7F => self.write_io(addr, value),
             0xFF80..=0xFFFE => self.hram[(addr as usize - 0xFF80) % HRAM_SIZE] = value,
             0xFFFF => self.interrupt_enable = value,
         }
     }
 }
 
+impl Bus {
+    fn read_io(&self, addr: u16) -> u8 {
+        match addr {
+            REG_DIV => self.div,
+            REG_TIMA => self.tima,
+            REG_TMA => self.tma,
+            REG_TAC => self.tac,
+            REG_IF => self.interrupt_flag,
+            REG_STAT => self.stat,
+            REG_LY => self.ly,
+            _ => self.io[(addr as usize - 0xFF00) % IO_SIZE],
+        }
+    }
+
+    fn write_io(&mut self, addr: u16, value: u8) {
+        match addr {
+            REG_DIV => self.div = 0,
+            REG_TIMA => self.tima = value,
+            REG_TMA => self.tma = value,
+            REG_TAC => self.tac = value,
+            REG_IF => self.interrupt_flag = value,
+            REG_STAT => self.stat = value,
+            REG_LY => self.ly = 0,
+            _ => self.io[(addr as usize - 0xFF00) % IO_SIZE] = value,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BOOT_ROM_SIZE, Bus};
+    use super::{
+        BOOT_ROM_SIZE, Bus, REG_DIV, REG_IF, REG_LY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA,
+    };
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
 
@@ -162,5 +214,32 @@ mod tests {
         assert_eq!(bus.read8(0xFE00), 0x78);
         assert_eq!(bus.read8(0xFF80), 0x9A);
         assert_eq!(bus.read8(0xFFFF), 0xBC);
+    }
+
+    #[test]
+    fn bus_mmio_register_semantics() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(REG_TIMA, 0x12);
+        bus.write8(REG_TMA, 0x34);
+        bus.write8(REG_TAC, 0x56);
+        bus.write8(REG_STAT, 0x78);
+        bus.write8(REG_IF, 0x9A);
+        bus.write8(0xFFFF, 0xBC);
+
+        assert_eq!(bus.read8(REG_TIMA), 0x12);
+        assert_eq!(bus.read8(REG_TMA), 0x34);
+        assert_eq!(bus.read8(REG_TAC), 0x56);
+        assert_eq!(bus.read8(REG_STAT), 0x78);
+        assert_eq!(bus.read8(REG_IF), 0x9A);
+        assert_eq!(bus.read8(0xFFFF), 0xBC);
+
+        bus.write8(REG_DIV, 0xFF);
+        bus.write8(REG_LY, 0x55);
+        assert_eq!(bus.read8(REG_DIV), 0x00);
+        assert_eq!(bus.read8(REG_LY), 0x00);
     }
 }
