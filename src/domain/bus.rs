@@ -131,6 +131,7 @@ impl Bus {
     pub fn step(&mut self, cycles: u32) {
         self.step_div(cycles);
         self.step_timer(cycles);
+        self.mbc.tick(cycles);
     }
 }
 

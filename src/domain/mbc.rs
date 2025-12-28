@@ -7,6 +7,7 @@ const EXT_RAM_BANK_SIZE: usize = 0x2000;
 const MBC2_RAM_SIZE: usize = 512;
 const MBC2_RAM_END: u16 = 0xA1FF;
 const OPEN_BUS: u8 = 0xFF;
+const CYCLES_PER_SECOND: u32 = 4_194_304;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MbcError {
@@ -70,6 +71,12 @@ impl Mbc {
             MbcKind::Mbc2(mbc2) => mbc2.write8(cartridge, addr, value),
             MbcKind::Mbc3(mbc3) => mbc3.write8(cartridge, addr, value),
             MbcKind::Mbc5(mbc5) => mbc5.write8(cartridge, addr, value),
+        }
+    }
+
+    pub fn tick(&mut self, cycles: u32) {
+        if let MbcKind::Mbc3(mbc3) = &mut self.kind {
+            mbc3.tick(cycles);
         }
     }
 }
@@ -268,6 +275,54 @@ impl Rtc {
             RtcRegister::DayHigh => self.day_high = value,
         }
     }
+
+    fn tick_seconds(&mut self, seconds: u32) {
+        if self.day_high & 0x40 != 0 {
+            return;
+        }
+
+        let mut remaining = seconds;
+        while remaining > 0 {
+            remaining -= 1;
+            self.increment_one_second();
+        }
+    }
+
+    fn increment_one_second(&mut self) {
+        self.seconds = self.seconds.wrapping_add(1);
+        if self.seconds < 60 {
+            return;
+        }
+        self.seconds = 0;
+        self.minutes = self.minutes.wrapping_add(1);
+        if self.minutes < 60 {
+            return;
+        }
+        self.minutes = 0;
+        self.hours = self.hours.wrapping_add(1);
+        if self.hours < 24 {
+            return;
+        }
+        self.hours = 0;
+
+        let day = self.day_counter();
+        if day == 0x1FF {
+            self.set_day_counter(0);
+            self.day_high |= 0x80;
+        } else {
+            self.set_day_counter(day + 1);
+        }
+    }
+
+    fn day_counter(&self) -> u16 {
+        let high = (self.day_high & 0x01) as u16;
+        u16::from(self.day_low) | (high << 8)
+    }
+
+    fn set_day_counter(&mut self, day: u16) {
+        self.day_low = day as u8;
+        self.day_high = (self.day_high & 0xFE) | ((day >> 8) as u8 & 0x01);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +332,7 @@ struct Mbc3 {
     rtc_reg: Option<RtcRegister>,
     ram_enabled: bool,
     latch_pending: bool,
+    rtc_counter: u32,
     rtc: Rtc,
     rtc_latched: Rtc,
     latched: bool,
@@ -297,6 +353,7 @@ impl Mbc3 {
             rtc_reg: None,
             ram_enabled: false,
             latch_pending: false,
+            rtc_counter: 0,
             rtc,
             rtc_latched: rtc,
             latched: false,
@@ -371,6 +428,14 @@ impl Mbc3 {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn tick(&mut self, cycles: u32) {
+        self.rtc_counter = self.rtc_counter.wrapping_add(cycles);
+        while self.rtc_counter >= CYCLES_PER_SECOND {
+            self.rtc_counter -= CYCLES_PER_SECOND;
+            self.rtc.tick_seconds(1);
         }
     }
 }
@@ -529,7 +594,7 @@ fn normalize_switchable_bank(bank: usize, bank_count: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mbc, bank_count};
+    use super::{CYCLES_PER_SECOND, Mbc, bank_count};
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
 
@@ -654,6 +719,22 @@ mod tests {
 
         mbc.write8(&mut cartridge, 0xA000, 0x30);
         assert_eq!(mbc.read8(&cartridge, 0xA000), 0x25);
+    }
+
+    #[test]
+    fn mbc3_rtc_ticks_with_cycles() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0x0F;
+        bytes[0x0149] = 0x02;
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        mbc.write8(&mut cartridge, 0x0000, 0x0A);
+        mbc.write8(&mut cartridge, 0x4000, 0x08);
+        mbc.tick(CYCLES_PER_SECOND);
+
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 1);
     }
 
     #[test]
