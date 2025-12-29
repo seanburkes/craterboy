@@ -58,7 +58,7 @@ pub fn save_battery_ram(path: impl AsRef<Path>, cartridge: &Cartridge) -> Result
     Ok(())
 }
 
-fn save_path_for_rom(path: &Path) -> PathBuf {
+pub(crate) fn save_path_for_rom(path: &Path) -> PathBuf {
     path.with_extension("sav")
 }
 
