@@ -416,13 +416,17 @@ impl Mbc3 {
                             self.current_rtc().read(reg)
                         }
                     } else {
-                        let ram_bank =
-                            normalize_ram_bank(self.ram_bank as usize, ram_bank_count_for(cartridge, 4));
+                        let ram_bank = normalize_ram_bank(
+                            self.ram_bank as usize,
+                            ram_bank_count_for(cartridge, 4),
+                        );
                         read_ext_ram(cartridge, ram_bank, addr)
                     }
                 } else {
-                    let ram_bank =
-                        normalize_ram_bank(self.ram_bank as usize, ram_bank_count_for(cartridge, 4));
+                    let ram_bank = normalize_ram_bank(
+                        self.ram_bank as usize,
+                        ram_bank_count_for(cartridge, 4),
+                    );
                     read_ext_ram(cartridge, ram_bank, addr)
                 }
             }
@@ -483,13 +487,17 @@ impl Mbc3 {
                             self.rtc_host_base = Some(SystemTime::now());
                         }
                     } else {
-                        let ram_bank =
-                            normalize_ram_bank(self.ram_bank as usize, ram_bank_count_for(cartridge, 4));
+                        let ram_bank = normalize_ram_bank(
+                            self.ram_bank as usize,
+                            ram_bank_count_for(cartridge, 4),
+                        );
                         write_ext_ram(cartridge, ram_bank, addr, value);
                     }
                 } else {
-                    let ram_bank =
-                        normalize_ram_bank(self.ram_bank as usize, ram_bank_count_for(cartridge, 4));
+                    let ram_bank = normalize_ram_bank(
+                        self.ram_bank as usize,
+                        ram_bank_count_for(cartridge, 4),
+                    );
                     write_ext_ram(cartridge, ram_bank, addr, value);
                 }
             }
