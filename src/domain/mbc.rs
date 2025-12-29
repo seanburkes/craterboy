@@ -141,6 +141,7 @@ impl Mbc1 {
                     Mbc1Mode::RomBanking => 0,
                     Mbc1Mode::RamBanking => self.ram_bank as usize,
                 };
+                let ram_bank = normalize_ram_bank(ram_bank, ram_bank_count_for(cartridge, 4));
                 read_ext_ram(cartridge, ram_bank, addr)
             }
             _ => OPEN_BUS,
@@ -175,6 +176,7 @@ impl Mbc1 {
                     Mbc1Mode::RomBanking => 0,
                     Mbc1Mode::RamBanking => self.ram_bank as usize,
                 };
+                let ram_bank = normalize_ram_bank(ram_bank, ram_bank_count_for(cartridge, 4));
                 write_ext_ram(cartridge, ram_bank, addr, value);
             }
             _ => {}
@@ -414,10 +416,14 @@ impl Mbc3 {
                             self.current_rtc().read(reg)
                         }
                     } else {
-                        read_ext_ram(cartridge, self.ram_bank as usize, addr)
+                        let ram_bank =
+                            normalize_ram_bank(self.ram_bank as usize, ram_bank_count_for(cartridge, 4));
+                        read_ext_ram(cartridge, ram_bank, addr)
                     }
                 } else {
-                    read_ext_ram(cartridge, self.ram_bank as usize, addr)
+                    let ram_bank =
+                        normalize_ram_bank(self.ram_bank as usize, ram_bank_count_for(cartridge, 4));
+                    read_ext_ram(cartridge, ram_bank, addr)
                 }
             }
             _ => OPEN_BUS,
@@ -477,10 +483,14 @@ impl Mbc3 {
                             self.rtc_host_base = Some(SystemTime::now());
                         }
                     } else {
-                        write_ext_ram(cartridge, self.ram_bank as usize, addr, value);
+                        let ram_bank =
+                            normalize_ram_bank(self.ram_bank as usize, ram_bank_count_for(cartridge, 4));
+                        write_ext_ram(cartridge, ram_bank, addr, value);
                     }
                 } else {
-                    write_ext_ram(cartridge, self.ram_bank as usize, addr, value);
+                    let ram_bank =
+                        normalize_ram_bank(self.ram_bank as usize, ram_bank_count_for(cartridge, 4));
+                    write_ext_ram(cartridge, ram_bank, addr, value);
                 }
             }
             _ => {}
@@ -579,7 +589,9 @@ impl Mbc5 {
                 if !self.ram_enabled {
                     return OPEN_BUS;
                 }
-                read_ext_ram(cartridge, self.ram_bank as usize, addr)
+                let ram_bank =
+                    normalize_ram_bank(self.ram_bank as usize, ram_bank_count_for(cartridge, 16));
+                read_ext_ram(cartridge, ram_bank, addr)
             }
             _ => OPEN_BUS,
         }
@@ -603,7 +615,9 @@ impl Mbc5 {
                 if !self.ram_enabled {
                     return;
                 }
-                write_ext_ram(cartridge, self.ram_bank as usize, addr, value);
+                let ram_bank =
+                    normalize_ram_bank(self.ram_bank as usize, ram_bank_count_for(cartridge, 16));
+                write_ext_ram(cartridge, ram_bank, addr, value);
             }
             _ => {}
         }
@@ -617,30 +631,40 @@ fn read_rom_only(cartridge: &Cartridge, addr: u16) -> u8 {
             let bank = normalize_switchable_bank(1, bank_count);
             RomBankMapping::with_banks(&cartridge.bytes, 0, bank).read(addr)
         }
-        EXT_RAM_START..=EXT_RAM_END => read_ext_ram(cartridge, 0, addr),
+        EXT_RAM_START..=EXT_RAM_END => {
+            let ram_bank = normalize_ram_bank(0, ram_bank_count_for(cartridge, 1));
+            read_ext_ram(cartridge, ram_bank, addr)
+        }
         _ => OPEN_BUS,
     }
 }
 
 fn write_rom_only(cartridge: &mut Cartridge, addr: u16, value: u8) {
     if matches!(addr, EXT_RAM_START..=EXT_RAM_END) {
-        write_ext_ram(cartridge, 0, addr, value);
+        let ram_bank = normalize_ram_bank(0, ram_bank_count_for(cartridge, 1));
+        write_ext_ram(cartridge, ram_bank, addr, value);
     }
 }
 
-fn read_ext_ram(cartridge: &Cartridge, bank: usize, addr: u16) -> u8 {
+fn read_ext_ram(cartridge: &Cartridge, bank: Option<usize>, addr: u16) -> u8 {
     if cartridge.ext_ram.is_empty() {
         return OPEN_BUS;
     }
+    let Some(bank) = bank else {
+        return OPEN_BUS;
+    };
     let offset = addr as usize - EXT_RAM_START as usize;
     let index = bank * EXT_RAM_BANK_SIZE + offset;
     cartridge.ext_ram.get(index).copied().unwrap_or(OPEN_BUS)
 }
 
-fn write_ext_ram(cartridge: &mut Cartridge, bank: usize, addr: u16, value: u8) {
+fn write_ext_ram(cartridge: &mut Cartridge, bank: Option<usize>, addr: u16, value: u8) {
     if cartridge.ext_ram.is_empty() {
         return;
     }
+    let Some(bank) = bank else {
+        return;
+    };
     let offset = addr as usize - EXT_RAM_START as usize;
     let index = bank * EXT_RAM_BANK_SIZE + offset;
     if let Some(byte) = cartridge.ext_ram.get_mut(index) {
@@ -677,6 +701,22 @@ fn write_mbc2_ram(cartridge: &mut Cartridge, addr: u16, value: u8) {
             *byte = value;
             cartridge.mark_ram_dirty();
         }
+    }
+}
+
+fn ram_bank_count_for(cartridge: &Cartridge, max_banks: usize) -> usize {
+    if cartridge.ext_ram.is_empty() {
+        return 0;
+    }
+    let banks = (cartridge.ext_ram.len() + EXT_RAM_BANK_SIZE - 1) / EXT_RAM_BANK_SIZE;
+    banks.min(max_banks)
+}
+
+fn normalize_ram_bank(bank: usize, bank_count: usize) -> Option<usize> {
+    if bank_count == 0 {
+        None
+    } else {
+        Some(bank % bank_count)
     }
 }
 
@@ -793,6 +833,23 @@ mod tests {
         assert_eq!(mbc.read8(&cartridge, 0xA000), 0x22);
         mbc.write8(&mut cartridge, 0x4000, 0x00);
         assert_eq!(mbc.read8(&cartridge, 0xA000), 0x11);
+    }
+
+    #[test]
+    fn mbc1_small_ram_ignores_bank_selection() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0x03;
+        bytes[0x0149] = 0x02;
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        mbc.write8(&mut cartridge, 0x0000, 0x0A);
+        mbc.write8(&mut cartridge, 0xA000, 0x44);
+
+        mbc.write8(&mut cartridge, 0x6000, 0x01);
+        mbc.write8(&mut cartridge, 0x4000, 0x02);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0x44);
     }
 
     #[test]
