@@ -86,9 +86,7 @@ mod tests {
     fn unique_rom_path() -> std::path::PathBuf {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let filename = format!("craterboy_save_manager_{}_{}", std::process::id(), id);
-        std::env::temp_dir()
-            .join(filename)
-            .with_extension("gb")
+        std::env::temp_dir().join(filename).with_extension("gb")
     }
 
     #[test]
@@ -102,13 +100,17 @@ mod tests {
 
         let mut manager = SaveManager::new(Duration::from_secs(5));
         let start = Instant::now();
-        assert!(!manager
-            .maybe_flush_at(start, &rom_path, &mut cartridge)
-            .expect("maybe flush"));
+        assert!(
+            !manager
+                .maybe_flush_at(start, &rom_path, &mut cartridge)
+                .expect("maybe flush")
+        );
 
-        assert!(manager
-            .maybe_flush_at(start + Duration::from_secs(6), &rom_path, &mut cartridge)
-            .expect("maybe flush"));
+        assert!(
+            manager
+                .maybe_flush_at(start + Duration::from_secs(6), &rom_path, &mut cartridge)
+                .expect("maybe flush")
+        );
         assert!(!cartridge.is_ram_dirty());
 
         let save_path = save_path_for_rom(&rom_path);
