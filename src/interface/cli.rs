@@ -33,23 +33,21 @@ pub fn run() {
 
     let path = match path {
         Some(path) => path,
-        None => {
-            match app::load_auto_resume_path() {
-                Ok(Some(path)) => {
-                    println!("Auto-resume: {}", path.display());
-                    path
-                }
-                Ok(None) => {
-                    print_usage(&program);
-                    std::process::exit(2);
-                }
-                Err(err) => {
-                    eprintln!("Failed to load auto-resume metadata: {:?}", err);
-                    print_usage(&program);
-                    std::process::exit(2);
-                }
+        None => match app::load_auto_resume_path() {
+            Ok(Some(path)) => {
+                println!("Auto-resume: {}", path.display());
+                path
             }
-        }
+            Ok(None) => {
+                print_usage(&program);
+                std::process::exit(2);
+            }
+            Err(err) => {
+                eprintln!("Failed to load auto-resume metadata: {:?}", err);
+                print_usage(&program);
+                std::process::exit(2);
+            }
+        },
     };
 
     match app::load_rom(&path) {
@@ -105,10 +103,18 @@ fn report_load_error(path: &Path, err: RomLoadError) {
             eprintln!("Failed to read ROM '{}': {}", path.display(), io_err);
         }
         RomLoadError::Header(header_err) => {
-            eprintln!("Invalid ROM header for '{}': {:?}", path.display(), header_err);
+            eprintln!(
+                "Invalid ROM header for '{}': {:?}",
+                path.display(),
+                header_err
+            );
         }
         RomLoadError::SaveIo(io_err) => {
-            eprintln!("Failed to read save data for '{}': {}", path.display(), io_err);
+            eprintln!(
+                "Failed to read save data for '{}': {}",
+                path.display(),
+                io_err
+            );
         }
     }
 }
