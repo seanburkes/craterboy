@@ -4,11 +4,12 @@ use crate::domain::{
     compute_global_checksum, compute_header_checksum, nintendo_logo_matches,
 };
 use crate::infrastructure::rom_loader::RomLoadError;
+use std::path::{Path, PathBuf};
 
 pub fn run() {
     let mut args = std::env::args();
     let program = args.next().unwrap_or_else(|| "craterboy".to_string());
-    let mut path: Option<String> = None;
+    let mut path: Option<PathBuf> = None;
     let mut verbose = false;
 
     for arg in args {
@@ -25,7 +26,7 @@ pub fn run() {
                     print_usage(&program);
                     std::process::exit(2);
                 }
-                path = Some(arg);
+                path = Some(PathBuf::from(arg));
             }
         }
     }
@@ -33,13 +34,31 @@ pub fn run() {
     let path = match path {
         Some(path) => path,
         None => {
-            print_usage(&program);
-            std::process::exit(2);
+            match app::load_auto_resume_path() {
+                Ok(Some(path)) => {
+                    println!("Auto-resume: {}", path.display());
+                    path
+                }
+                Ok(None) => {
+                    print_usage(&program);
+                    std::process::exit(2);
+                }
+                Err(err) => {
+                    eprintln!("Failed to load auto-resume metadata: {:?}", err);
+                    print_usage(&program);
+                    std::process::exit(2);
+                }
+            }
         }
     };
 
     match app::load_rom(&path) {
-        Ok(cartridge) => print_report(&path, &cartridge, verbose),
+        Ok(cartridge) => {
+            print_report(&path, &cartridge, verbose);
+            if let Err(err) = app::save_auto_resume_for(path.clone()) {
+                eprintln!("Failed to save auto-resume metadata: {:?}", err);
+            }
+        }
         Err(err) => {
             report_load_error(&path, err);
             std::process::exit(1);
@@ -47,8 +66,8 @@ pub fn run() {
     }
 }
 
-fn print_report(path: &str, cartridge: &Cartridge, verbose: bool) {
-    println!("ROM: {}", path);
+fn print_report(path: &Path, cartridge: &Cartridge, verbose: bool) {
+    println!("ROM: {}", path.display());
     println!(
         "File Size: {} bytes ({} KiB)",
         cartridge.bytes.len(),
@@ -80,16 +99,16 @@ fn print_header(header: &RomHeader) {
     println!("Global Checksum: 0x{:04X}", header.global_checksum);
 }
 
-fn report_load_error(path: &str, err: RomLoadError) {
+fn report_load_error(path: &Path, err: RomLoadError) {
     match err {
         RomLoadError::Io(io_err) => {
-            eprintln!("Failed to read ROM '{}': {}", path, io_err);
+            eprintln!("Failed to read ROM '{}': {}", path.display(), io_err);
         }
         RomLoadError::Header(header_err) => {
-            eprintln!("Invalid ROM header for '{}': {:?}", path, header_err);
+            eprintln!("Invalid ROM header for '{}': {:?}", path.display(), header_err);
         }
         RomLoadError::SaveIo(io_err) => {
-            eprintln!("Failed to read save data for '{}': {}", path, io_err);
+            eprintln!("Failed to read save data for '{}': {}", path.display(), io_err);
         }
     }
 }

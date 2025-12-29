@@ -135,6 +135,12 @@ pub fn load_last_session(
     Ok(Some(metadata))
 }
 
+pub fn default_resume_path() -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("craterboy_last_session.bin")
+}
+
 fn write_atomic(path: &Path, data: &[u8]) -> Result<(), ResumeError> {
     let mut temp_path = path.to_path_buf();
     let unique = format!(
