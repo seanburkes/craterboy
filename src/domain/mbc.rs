@@ -49,7 +49,13 @@ impl Mbc {
             | CartridgeType::Mbc3Ram
             | CartridgeType::Mbc3RamBattery
             | CartridgeType::Mbc3TimerBattery
-            | CartridgeType::Mbc3TimerRamBattery => MbcKind::Mbc3(Mbc3::new()),
+            | CartridgeType::Mbc3TimerRamBattery => {
+                let has_rtc = matches!(
+                    cartridge.header.cartridge_type,
+                    CartridgeType::Mbc3TimerBattery | CartridgeType::Mbc3TimerRamBattery
+                );
+                MbcKind::Mbc3(Mbc3::new(has_rtc))
+            }
             CartridgeType::Mbc5
             | CartridgeType::Mbc5Ram
             | CartridgeType::Mbc5RamBattery
@@ -355,6 +361,7 @@ struct Mbc3 {
     rtc_reg: Option<RtcRegister>,
     ram_enabled: bool,
     latch_pending: bool,
+    has_rtc: bool,
     rtc_mode: RtcMode,
     rtc_host_base: Option<SystemTime>,
     rtc_counter: u32,
@@ -364,7 +371,7 @@ struct Mbc3 {
 }
 
 impl Mbc3 {
-    fn new() -> Self {
+    fn new(has_rtc: bool) -> Self {
         let rtc = Rtc {
             seconds: 0,
             minutes: 0,
@@ -378,6 +385,7 @@ impl Mbc3 {
             rtc_reg: None,
             ram_enabled: false,
             latch_pending: false,
+            has_rtc,
             rtc_mode: RtcMode::Deterministic,
             rtc_host_base: None,
             rtc_counter: 0,
@@ -398,11 +406,15 @@ impl Mbc3 {
                 if !self.ram_enabled {
                     return OPEN_BUS;
                 }
-                if let Some(reg) = self.rtc_reg {
-                    if self.latched {
-                        self.rtc_latched.read(reg)
+                if self.has_rtc {
+                    if let Some(reg) = self.rtc_reg {
+                        if self.latched {
+                            self.rtc_latched.read(reg)
+                        } else {
+                            self.current_rtc().read(reg)
+                        }
                     } else {
-                        self.current_rtc().read(reg)
+                        read_ext_ram(cartridge, self.ram_bank as usize, addr)
                     }
                 } else {
                     read_ext_ram(cartridge, self.ram_bank as usize, addr)
@@ -426,14 +438,24 @@ impl Mbc3 {
                     self.ram_bank = value & 0x03;
                     self.rtc_reg = None;
                 }
-                0x08 => self.rtc_reg = Some(RtcRegister::Seconds),
-                0x09 => self.rtc_reg = Some(RtcRegister::Minutes),
-                0x0A => self.rtc_reg = Some(RtcRegister::Hours),
-                0x0B => self.rtc_reg = Some(RtcRegister::DayLow),
-                0x0C => self.rtc_reg = Some(RtcRegister::DayHigh),
+                0x08..=0x0C => {
+                    if self.has_rtc {
+                        self.rtc_reg = match value {
+                            0x08 => Some(RtcRegister::Seconds),
+                            0x09 => Some(RtcRegister::Minutes),
+                            0x0A => Some(RtcRegister::Hours),
+                            0x0B => Some(RtcRegister::DayLow),
+                            0x0C => Some(RtcRegister::DayHigh),
+                            _ => None,
+                        };
+                    }
+                }
                 _ => {}
             },
             0x6000..=0x7FFF => {
+                if !self.has_rtc {
+                    return;
+                }
                 if value == 0x00 {
                     self.latch_pending = true;
                 } else if value == 0x01 && self.latch_pending {
@@ -448,10 +470,14 @@ impl Mbc3 {
                 if !self.ram_enabled {
                     return;
                 }
-                if let Some(reg) = self.rtc_reg {
-                    self.rtc.write(reg, value);
-                    if self.rtc_mode == RtcMode::HostSync {
-                        self.rtc_host_base = Some(SystemTime::now());
+                if self.has_rtc {
+                    if let Some(reg) = self.rtc_reg {
+                        self.rtc.write(reg, value);
+                        if self.rtc_mode == RtcMode::HostSync {
+                            self.rtc_host_base = Some(SystemTime::now());
+                        }
+                    } else {
+                        write_ext_ram(cartridge, self.ram_bank as usize, addr, value);
                     }
                 } else {
                     write_ext_ram(cartridge, self.ram_bank as usize, addr, value);
@@ -462,6 +488,9 @@ impl Mbc3 {
     }
 
     fn tick(&mut self, cycles: u32) {
+        if !self.has_rtc {
+            return;
+        }
         if self.rtc_mode != RtcMode::Deterministic {
             return;
         }
@@ -473,6 +502,9 @@ impl Mbc3 {
     }
 
     fn set_rtc_mode(&mut self, mode: RtcMode) {
+        if !self.has_rtc {
+            return;
+        }
         if self.rtc_mode == mode {
             return;
         }
@@ -822,6 +854,22 @@ mod tests {
         mbc.tick(CYCLES_PER_SECOND);
 
         assert_eq!(mbc.read8(&cartridge, 0xA000), 1);
+    }
+
+    #[test]
+    fn mbc3_without_rtc_ignores_rtc_register_selection() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0x13;
+        bytes[0x0149] = 0x02;
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        mbc.write8(&mut cartridge, 0x0000, 0x0A);
+        mbc.write8(&mut cartridge, 0xA000, 0x55);
+        mbc.write8(&mut cartridge, 0x4000, 0x08);
+
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0x55);
     }
 
     #[test]
