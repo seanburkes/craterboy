@@ -122,7 +122,9 @@ pub fn save_last_session(
     Ok(())
 }
 
-pub fn load_last_session(path: impl AsRef<Path>) -> Result<Option<AutoResumeMetadata>, ResumeError> {
+pub fn load_last_session(
+    path: impl AsRef<Path>,
+) -> Result<Option<AutoResumeMetadata>, ResumeError> {
     let path = path.as_ref();
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
