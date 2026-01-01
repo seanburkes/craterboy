@@ -1,16 +1,31 @@
+use std::path::PathBuf;
+
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
+use crate::application::app;
+use crate::infrastructure::rom_loader::RomLoadError;
+
 const FRAME_WIDTH: u32 = 160;
 const FRAME_HEIGHT: u32 = 144;
+const TILE_SIZE: usize = 8;
+const TILE_BYTES: usize = 16;
+const TILE_DATA_OFFSET: usize = 0x0000;
+const DMG_PALETTE: [[u8; 3]; 4] = [
+    [0xE0, 0xF8, 0xD0],
+    [0x88, 0xC0, 0x70],
+    [0x34, 0x68, 0x56],
+    [0x08, 0x18, 0x20],
+];
 
-pub fn run() {
-    pollster::block_on(run_async());
+pub fn run(rom_path: Option<PathBuf>) {
+    pollster::block_on(run_async(rom_path));
 }
 
-async fn run_async() {
+async fn run_async(rom_path: Option<PathBuf>) {
+    let rom_bytes = load_rom_bytes(rom_path);
     let event_loop = EventLoop::new().expect("event loop");
     let window = WindowBuilder::new()
         .with_title("craterboy")
@@ -25,19 +40,18 @@ async fn run_async() {
         ..Default::default()
     });
     let surface = instance.create_surface(window).expect("surface");
-    let mut state = State::new(instance, surface, size).await;
+    let mut state = State::new(instance, surface, size, rom_bytes).await;
 
     let _ = event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Poll);
 
         match event {
-            Event::WindowEvent { event, window_id } if window_id == target_window_id => {
-                match event {
-                    WindowEvent::CloseRequested => elwt.exit(),
-                    WindowEvent::Resized(size) => state.resize(size),
-                    _ => {}
-                }
-            }
+            Event::WindowEvent { event, window_id } if window_id == target_window_id => match event
+            {
+                WindowEvent::CloseRequested => elwt.exit(),
+                WindowEvent::Resized(size) => state.resize(size),
+                _ => {}
+            },
             Event::AboutToWait => {
                 state.update_frame();
                 match state.render() {
@@ -53,6 +67,49 @@ async fn run_async() {
     });
 }
 
+fn load_rom_bytes(path: Option<PathBuf>) -> Option<Vec<u8>> {
+    let mut path = path;
+    if path.is_none() {
+        if let Ok(Some((resume_path, _))) = app::load_auto_resume_path() {
+            path = Some(resume_path);
+        }
+    }
+
+    let Some(path) = path else {
+        return None;
+    };
+
+    match app::load_rom(&path) {
+        Ok(cartridge) => Some(cartridge.bytes),
+        Err(err) => {
+            report_rom_error(&path, err);
+            None
+        }
+    }
+}
+
+fn report_rom_error(path: &PathBuf, err: RomLoadError) {
+    match err {
+        RomLoadError::Io(io_err) => {
+            eprintln!("Failed to read ROM '{}': {}", path.display(), io_err);
+        }
+        RomLoadError::Header(header_err) => {
+            eprintln!(
+                "Invalid ROM header for '{}': {:?}",
+                path.display(),
+                header_err
+            );
+        }
+        RomLoadError::SaveIo(io_err) => {
+            eprintln!(
+                "Failed to read save data for '{}': {}",
+                path.display(),
+                io_err
+            );
+        }
+    }
+}
+
 struct State {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -66,6 +123,8 @@ struct State {
     pipeline: wgpu::RenderPipeline,
     framebuffer: Vec<u8>,
     frame_index: u8,
+    rom_bytes: Option<Vec<u8>>,
+    rom_frame_ready: bool,
 }
 
 impl State {
@@ -73,6 +132,7 @@ impl State {
         instance: wgpu::Instance,
         surface: wgpu::Surface<'static>,
         size: PhysicalSize<u32>,
+        rom_bytes: Option<Vec<u8>>,
     ) -> Self {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -226,6 +286,8 @@ impl State {
             pipeline,
             framebuffer,
             frame_index: 0,
+            rom_bytes,
+            rom_frame_ready: false,
         }
     }
 
@@ -240,6 +302,14 @@ impl State {
     }
 
     fn update_frame(&mut self) {
+        if let Some(rom) = self.rom_bytes.as_deref() {
+            if !self.rom_frame_ready {
+                Self::render_rom_tiles(&mut self.framebuffer, rom);
+                self.rom_frame_ready = true;
+            }
+            return;
+        }
+
         self.frame_index = self.frame_index.wrapping_add(1);
         let width = FRAME_WIDTH as usize;
         let height = FRAME_HEIGHT as usize;
@@ -253,6 +323,53 @@ impl State {
                 self.framebuffer[idx + 1] = g;
                 self.framebuffer[idx + 2] = b;
                 self.framebuffer[idx + 3] = 0xFF;
+            }
+        }
+    }
+
+    fn render_rom_tiles(framebuffer: &mut [u8], rom: &[u8]) {
+        let width = FRAME_WIDTH as usize;
+        let height = FRAME_HEIGHT as usize;
+        let bg = DMG_PALETTE[0];
+        for idx in (0..framebuffer.len()).step_by(4) {
+            framebuffer[idx] = bg[0];
+            framebuffer[idx + 1] = bg[1];
+            framebuffer[idx + 2] = bg[2];
+            framebuffer[idx + 3] = 0xFF;
+        }
+
+        let tiles_per_row = width / TILE_SIZE;
+        let tiles_per_col = height / TILE_SIZE;
+        let tile_count = tiles_per_row * tiles_per_col;
+
+        for tile_index in 0..tile_count {
+            let tile_offset = TILE_DATA_OFFSET + tile_index * TILE_BYTES;
+            if tile_offset + TILE_BYTES > rom.len() {
+                break;
+            }
+            let tile = &rom[tile_offset..tile_offset + TILE_BYTES];
+            let tile_x = (tile_index % tiles_per_row) * TILE_SIZE;
+            let tile_y = (tile_index / tiles_per_row) * TILE_SIZE;
+            Self::draw_tile(framebuffer, tile, tile_x, tile_y);
+        }
+    }
+
+    fn draw_tile(framebuffer: &mut [u8], tile: &[u8], tile_x: usize, tile_y: usize) {
+        let width = FRAME_WIDTH as usize;
+        for row in 0..TILE_SIZE {
+            let lo = tile[row * 2];
+            let hi = tile[row * 2 + 1];
+            for col in 0..TILE_SIZE {
+                let bit = 7 - col;
+                let color_index = ((hi >> bit) & 0x1) << 1 | ((lo >> bit) & 0x1);
+                let color = DMG_PALETTE[color_index as usize];
+                let x = tile_x + col;
+                let y = tile_y + row;
+                let idx = (y * width + x) * 4;
+                framebuffer[idx] = color[0];
+                framebuffer[idx + 1] = color[1];
+                framebuffer[idx + 2] = color[2];
+                framebuffer[idx + 3] = 0xFF;
             }
         }
     }
@@ -281,10 +398,14 @@ impl State {
         );
 
         let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("render_encoder"),
-        });
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("render_encoder"),
+            });
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
