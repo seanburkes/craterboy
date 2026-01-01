@@ -308,12 +308,22 @@ impl Cpu {
                 bus.write8(addr, self.regs.a);
                 Ok(8)
             }
+            0x03 => {
+                let value = self.regs.bc().wrapping_add(1);
+                self.regs.set_bc(value);
+                Ok(8)
+            }
             0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D => {
                 let reg = Reg8::from_bits(opcode >> 3);
                 let value = self.read_reg8(reg, bus);
                 let next = self.dec8(value);
                 self.write_reg8(reg, next, bus);
                 Ok(if reg.is_hl() { 12 } else { 4 })
+            }
+            0x0B => {
+                let value = self.regs.bc().wrapping_sub(1);
+                self.regs.set_bc(value);
+                Ok(8)
             }
             0x06 => {
                 let value = self.fetch8(bus);
@@ -345,6 +355,11 @@ impl Cpu {
                 bus.write8(addr, self.regs.a);
                 Ok(8)
             }
+            0x13 => {
+                let value = self.regs.de().wrapping_add(1);
+                self.regs.set_de(value);
+                Ok(8)
+            }
             0x1A => {
                 let addr = self.regs.de();
                 self.regs.a = bus.read8(addr);
@@ -353,6 +368,11 @@ impl Cpu {
             0x1E => {
                 let value = self.fetch8(bus);
                 self.regs.e = value;
+                Ok(8)
+            }
+            0x1B => {
+                let value = self.regs.de().wrapping_sub(1);
+                self.regs.set_de(value);
                 Ok(8)
             }
             0x21 => {
@@ -368,6 +388,11 @@ impl Cpu {
             0x2E => {
                 let value = self.fetch8(bus);
                 self.regs.l = value;
+                Ok(8)
+            }
+            0x23 => {
+                let value = self.regs.hl().wrapping_add(1);
+                self.regs.set_hl(value);
                 Ok(8)
             }
             0x31 => {
@@ -409,6 +434,15 @@ impl Cpu {
                 let addr = self.regs.hl();
                 self.regs.a = bus.read8(addr);
                 self.regs.set_hl(addr.wrapping_sub(1));
+                Ok(8)
+            }
+            0x2B => {
+                let value = self.regs.hl().wrapping_sub(1);
+                self.regs.set_hl(value);
+                Ok(8)
+            }
+            0x33 => {
+                self.sp = self.sp.wrapping_add(1);
                 Ok(8)
             }
             0x3E => {
@@ -525,6 +559,12 @@ impl Cpu {
                 self.alu_xor(value);
                 Ok(8)
             }
+            0xE8 => {
+                let offset = self.fetch8(bus) as i8;
+                let result = self.add_sp_offset(offset);
+                self.sp = result;
+                Ok(16)
+            }
             0xFA => {
                 let addr = self.fetch16(bus);
                 self.regs.a = bus.read8(addr);
@@ -533,6 +573,16 @@ impl Cpu {
             0xF6 => {
                 let value = self.fetch8(bus);
                 self.alu_or(value);
+                Ok(8)
+            }
+            0xF8 => {
+                let offset = self.fetch8(bus) as i8;
+                let result = self.add_sp_offset(offset);
+                self.regs.set_hl(result);
+                Ok(12)
+            }
+            0x3B => {
+                self.sp = self.sp.wrapping_sub(1);
                 Ok(8)
             }
             0xFE => {
@@ -666,6 +716,19 @@ impl Cpu {
             .set_flag_h(((hl & 0x0FFF) + (value & 0x0FFF)) > 0x0FFF);
         self.regs.set_flag_c((hl as u32 + value as u32) > 0xFFFF);
         self.regs.set_hl(result);
+    }
+
+    fn add_sp_offset(&mut self, offset: i8) -> u16 {
+        let sp = self.sp;
+        let offset_u16 = offset as i16 as u16;
+        let result = sp.wrapping_add(offset_u16);
+        let carry = ((sp ^ offset_u16 ^ result) & 0x0100) != 0;
+        let half_carry = ((sp ^ offset_u16 ^ result) & 0x0010) != 0;
+        self.regs.set_flag_z(false);
+        self.regs.set_flag_n(false);
+        self.regs.set_flag_h(half_carry);
+        self.regs.set_flag_c(carry);
+        result
     }
 
     fn alu_and(&mut self, value: u8) {
@@ -981,5 +1044,79 @@ mod tests {
         assert_eq!(cpu.regs().a(), 0x11);
         cpu.step(&mut bus).expect("ld a,(de)");
         assert_eq!(cpu.regs().a(), 0x22);
+    }
+
+    #[test]
+    fn cpu_inc_dec_rr() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x01;
+        rom[0x0001] = 0xFF;
+        rom[0x0002] = 0xFF;
+        rom[0x0003] = 0x03;
+        rom[0x0004] = 0x0B;
+        rom[0x0005] = 0x11;
+        rom[0x0006] = 0x00;
+        rom[0x0007] = 0x10;
+        rom[0x0008] = 0x13;
+        rom[0x0009] = 0x1B;
+        rom[0x000A] = 0x21;
+        rom[0x000B] = 0x00;
+        rom[0x000C] = 0x20;
+        rom[0x000D] = 0x23;
+        rom[0x000E] = 0x2B;
+        rom[0x000F] = 0x31;
+        rom[0x0010] = 0x00;
+        rom[0x0011] = 0x30;
+        rom[0x0012] = 0x33;
+        rom[0x0013] = 0x3B;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+
+        cpu.step(&mut bus).expect("ld bc,d16");
+        cpu.step(&mut bus).expect("inc bc");
+        cpu.step(&mut bus).expect("dec bc");
+        assert_eq!(cpu.regs().bc(), 0xFFFF);
+
+        cpu.step(&mut bus).expect("ld de,d16");
+        cpu.step(&mut bus).expect("inc de");
+        cpu.step(&mut bus).expect("dec de");
+        assert_eq!(cpu.regs().de(), 0x1000);
+
+        cpu.step(&mut bus).expect("ld hl,d16");
+        cpu.step(&mut bus).expect("inc hl");
+        cpu.step(&mut bus).expect("dec hl");
+        assert_eq!(cpu.regs().hl(), 0x2000);
+
+        cpu.step(&mut bus).expect("ld sp,d16");
+        cpu.step(&mut bus).expect("inc sp");
+        cpu.step(&mut bus).expect("dec sp");
+        assert_eq!(cpu.sp(), 0x3000);
+    }
+
+    #[test]
+    fn cpu_add_sp_and_ld_hl_with_offset() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x31;
+        rom[0x0001] = 0xF8;
+        rom[0x0002] = 0xFF;
+        rom[0x0003] = 0xE8;
+        rom[0x0004] = 0x08;
+        rom[0x0005] = 0xF8;
+        rom[0x0006] = 0xF8;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+
+        cpu.step(&mut bus).expect("ld sp,d16");
+        cpu.step(&mut bus).expect("add sp,e8");
+        assert_eq!(cpu.sp(), 0x0000);
+        assert!(cpu.regs().flag_c());
+        assert!(cpu.regs().flag_h());
+        assert!(!cpu.regs().flag_z());
+        assert!(!cpu.regs().flag_n());
+
+        cpu.step(&mut bus).expect("ld hl,sp+e8");
+        assert_eq!(cpu.regs().hl(), 0xFFF8);
+        assert!(!cpu.regs().flag_c());
+        assert!(!cpu.regs().flag_h());
     }
 }
