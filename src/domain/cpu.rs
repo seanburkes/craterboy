@@ -179,6 +179,37 @@ pub enum CpuError {
     UnimplementedCbOpcode(u8),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reg8 {
+    B,
+    C,
+    D,
+    E,
+    H,
+    L,
+    Hl,
+    A,
+}
+
+impl Reg8 {
+    fn from_bits(bits: u8) -> Self {
+        match bits & 0x07 {
+            0 => Self::B,
+            1 => Self::C,
+            2 => Self::D,
+            3 => Self::E,
+            4 => Self::H,
+            5 => Self::L,
+            6 => Self::Hl,
+            _ => Self::A,
+        }
+    }
+
+    fn is_hl(self) -> bool {
+        matches!(self, Self::Hl)
+    }
+}
+
 #[derive(Debug)]
 pub struct Cpu {
     regs: Registers,
@@ -241,6 +272,20 @@ impl Cpu {
         let opcode = self.fetch8(bus);
         match opcode {
             0x00 => Ok(4),
+            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
+                let reg = Reg8::from_bits(opcode >> 3);
+                let value = self.read_reg8(reg, bus);
+                let next = self.inc8(value);
+                self.write_reg8(reg, next, bus);
+                Ok(if reg.is_hl() { 12 } else { 4 })
+            }
+            0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D => {
+                let reg = Reg8::from_bits(opcode >> 3);
+                let value = self.read_reg8(reg, bus);
+                let next = self.dec8(value);
+                self.write_reg8(reg, next, bus);
+                Ok(if reg.is_hl() { 12 } else { 4 })
+            }
             0x06 => {
                 let value = self.fetch8(bus);
                 self.regs.b = value;
@@ -282,6 +327,42 @@ impl Cpu {
                 self.regs.a = value;
                 Ok(8)
             }
+            0x80..=0x87 => {
+                let reg = Reg8::from_bits(opcode);
+                let value = self.read_reg8(reg, bus);
+                self.alu_add(value);
+                Ok(if reg.is_hl() { 8 } else { 4 })
+            }
+            0x90..=0x97 => {
+                let reg = Reg8::from_bits(opcode);
+                let value = self.read_reg8(reg, bus);
+                self.alu_sub(value);
+                Ok(if reg.is_hl() { 8 } else { 4 })
+            }
+            0xA0..=0xA7 => {
+                let reg = Reg8::from_bits(opcode);
+                let value = self.read_reg8(reg, bus);
+                self.alu_and(value);
+                Ok(if reg.is_hl() { 8 } else { 4 })
+            }
+            0xA8..=0xAF => {
+                let reg = Reg8::from_bits(opcode);
+                let value = self.read_reg8(reg, bus);
+                self.alu_xor(value);
+                Ok(if reg.is_hl() { 8 } else { 4 })
+            }
+            0xB0..=0xB7 => {
+                let reg = Reg8::from_bits(opcode);
+                let value = self.read_reg8(reg, bus);
+                self.alu_or(value);
+                Ok(if reg.is_hl() { 8 } else { 4 })
+            }
+            0xB8..=0xBF => {
+                let reg = Reg8::from_bits(opcode);
+                let value = self.read_reg8(reg, bus);
+                self.alu_cp(value);
+                Ok(if reg.is_hl() { 8 } else { 4 })
+            }
             0x18 => {
                 let offset = self.fetch8(bus) as i8;
                 self.pc = self.pc.wrapping_add(offset as u16);
@@ -296,20 +377,50 @@ impl Cpu {
                 self.stopped = true;
                 Ok(4)
             }
+            0xC6 => {
+                let value = self.fetch8(bus);
+                self.alu_add(value);
+                Ok(8)
+            }
             0xC3 => {
                 let addr = self.fetch16(bus);
                 self.pc = addr;
                 Ok(16)
+            }
+            0xD6 => {
+                let value = self.fetch8(bus);
+                self.alu_sub(value);
+                Ok(8)
             }
             0xEA => {
                 let addr = self.fetch16(bus);
                 bus.write8(addr, self.regs.a);
                 Ok(16)
             }
+            0xE6 => {
+                let value = self.fetch8(bus);
+                self.alu_and(value);
+                Ok(8)
+            }
+            0xEE => {
+                let value = self.fetch8(bus);
+                self.alu_xor(value);
+                Ok(8)
+            }
             0xFA => {
                 let addr = self.fetch16(bus);
                 self.regs.a = bus.read8(addr);
                 Ok(16)
+            }
+            0xF6 => {
+                let value = self.fetch8(bus);
+                self.alu_or(value);
+                Ok(8)
+            }
+            0xFE => {
+                let value = self.fetch8(bus);
+                self.alu_cp(value);
+                Ok(8)
             }
             0xCB => {
                 let opcode = self.fetch8(bus);
@@ -330,14 +441,113 @@ impl Cpu {
         let hi = self.fetch8(bus);
         u16::from_le_bytes([lo, hi])
     }
+
+    fn read_reg8(&self, reg: Reg8, bus: &Bus) -> u8 {
+        match reg {
+            Reg8::B => self.regs.b,
+            Reg8::C => self.regs.c,
+            Reg8::D => self.regs.d,
+            Reg8::E => self.regs.e,
+            Reg8::H => self.regs.h,
+            Reg8::L => self.regs.l,
+            Reg8::Hl => bus.read8(self.regs.hl()),
+            Reg8::A => self.regs.a,
+        }
+    }
+
+    fn write_reg8(&mut self, reg: Reg8, value: u8, bus: &mut Bus) {
+        match reg {
+            Reg8::B => self.regs.b = value,
+            Reg8::C => self.regs.c = value,
+            Reg8::D => self.regs.d = value,
+            Reg8::E => self.regs.e = value,
+            Reg8::H => self.regs.h = value,
+            Reg8::L => self.regs.l = value,
+            Reg8::Hl => bus.write8(self.regs.hl(), value),
+            Reg8::A => self.regs.a = value,
+        }
+    }
+
+    fn inc8(&mut self, value: u8) -> u8 {
+        let next = value.wrapping_add(1);
+        self.regs.set_flag_z(next == 0);
+        self.regs.set_flag_n(false);
+        self.regs.set_flag_h((value & 0x0F) + 1 > 0x0F);
+        next
+    }
+
+    fn dec8(&mut self, value: u8) -> u8 {
+        let next = value.wrapping_sub(1);
+        self.regs.set_flag_z(next == 0);
+        self.regs.set_flag_n(true);
+        self.regs.set_flag_h((value & 0x0F) == 0);
+        next
+    }
+
+    fn alu_add(&mut self, value: u8) {
+        let a = self.regs.a;
+        let (next, carry) = a.overflowing_add(value);
+        self.regs.a = next;
+        self.regs.set_flag_z(next == 0);
+        self.regs.set_flag_n(false);
+        self.regs
+            .set_flag_h(((a & 0x0F) + (value & 0x0F)) > 0x0F);
+        self.regs.set_flag_c(carry);
+    }
+
+    fn alu_sub(&mut self, value: u8) {
+        let a = self.regs.a;
+        let (next, borrow) = a.overflowing_sub(value);
+        self.regs.a = next;
+        self.regs.set_flag_z(next == 0);
+        self.regs.set_flag_n(true);
+        self.regs.set_flag_h((a & 0x0F) < (value & 0x0F));
+        self.regs.set_flag_c(borrow);
+    }
+
+    fn alu_and(&mut self, value: u8) {
+        let next = self.regs.a & value;
+        self.regs.a = next;
+        self.regs.set_flag_z(next == 0);
+        self.regs.set_flag_n(false);
+        self.regs.set_flag_h(true);
+        self.regs.set_flag_c(false);
+    }
+
+    fn alu_xor(&mut self, value: u8) {
+        let next = self.regs.a ^ value;
+        self.regs.a = next;
+        self.regs.set_flag_z(next == 0);
+        self.regs.set_flag_n(false);
+        self.regs.set_flag_h(false);
+        self.regs.set_flag_c(false);
+    }
+
+    fn alu_or(&mut self, value: u8) {
+        let next = self.regs.a | value;
+        self.regs.a = next;
+        self.regs.set_flag_z(next == 0);
+        self.regs.set_flag_n(false);
+        self.regs.set_flag_h(false);
+        self.regs.set_flag_c(false);
+    }
+
+    fn alu_cp(&mut self, value: u8) {
+        let a = self.regs.a;
+        let (next, borrow) = a.overflowing_sub(value);
+        self.regs.set_flag_z(next == 0);
+        self.regs.set_flag_n(true);
+        self.regs.set_flag_h((a & 0x0F) < (value & 0x0F));
+        self.regs.set_flag_c(borrow);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Cpu, Registers};
     use crate::domain::Bus;
-    use crate::domain::cartridge::ROM_BANK_SIZE;
     use crate::domain::Cartridge;
+    use crate::domain::cartridge::ROM_BANK_SIZE;
 
     fn bus_with_rom(mut rom: Vec<u8>) -> Bus {
         if rom.len() < 0x0150 {
@@ -357,7 +567,7 @@ mod tests {
 
     #[test]
     fn cpu_executes_nop() {
-        let mut rom = vec![0x00; ROM_BANK_SIZE];
+        let rom = vec![0x00; ROM_BANK_SIZE];
         let mut bus = bus_with_rom(rom);
         let mut cpu = Cpu::new();
 
@@ -396,5 +606,64 @@ mod tests {
 
         cpu.step(&mut bus).expect("jr");
         assert_eq!(cpu.pc(), 0x0004);
+    }
+
+    #[test]
+    fn cpu_add_sets_flags() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x3E;
+        rom[0x0001] = 0x0F;
+        rom[0x0002] = 0x06;
+        rom[0x0003] = 0x01;
+        rom[0x0004] = 0x80;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+
+        cpu.step(&mut bus).expect("ld a,d8");
+        cpu.step(&mut bus).expect("ld b,d8");
+        cpu.step(&mut bus).expect("add a,b");
+
+        assert_eq!(cpu.regs().a(), 0x10);
+        assert!(!cpu.regs().flag_z());
+        assert!(!cpu.regs().flag_n());
+        assert!(cpu.regs().flag_h());
+        assert!(!cpu.regs().flag_c());
+    }
+
+    #[test]
+    fn cpu_and_xor_or_cp() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x3E;
+        rom[0x0001] = 0xF0;
+        rom[0x0002] = 0xE6;
+        rom[0x0003] = 0x0F;
+        rom[0x0004] = 0xEE;
+        rom[0x0005] = 0x0F;
+        rom[0x0006] = 0xF6;
+        rom[0x0007] = 0x01;
+        rom[0x0008] = 0xFE;
+        rom[0x0009] = 0x01;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+
+        cpu.step(&mut bus).expect("ld a,d8");
+        cpu.step(&mut bus).expect("and d8");
+        assert_eq!(cpu.regs().a(), 0x00);
+        assert!(cpu.regs().flag_z());
+        assert!(cpu.regs().flag_h());
+
+        cpu.step(&mut bus).expect("xor d8");
+        assert_eq!(cpu.regs().a(), 0x0F);
+        assert!(!cpu.regs().flag_z());
+        assert!(!cpu.regs().flag_h());
+
+        cpu.step(&mut bus).expect("or d8");
+        assert_eq!(cpu.regs().a(), 0x0F);
+
+        cpu.step(&mut bus).expect("cp d8");
+        assert_eq!(cpu.regs().a(), 0x0F);
+        assert!(!cpu.regs().flag_z());
+        assert!(cpu.regs().flag_n());
+        assert!(!cpu.regs().flag_c());
     }
 }
