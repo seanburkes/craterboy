@@ -554,11 +554,38 @@ impl Cpu {
                 self.pc = addr;
                 Ok(16)
             }
+            0xC7 | 0xCF | 0xD7 | 0xDF | 0xE7 | 0xEF | 0xF7 | 0xFF => {
+                let addr = match opcode {
+                    0xC7 => 0x0000,
+                    0xCF => 0x0008,
+                    0xD7 => 0x0010,
+                    0xDF => 0x0018,
+                    0xE7 => 0x0020,
+                    0xEF => 0x0028,
+                    0xF7 => 0x0030,
+                    _ => 0x0038,
+                };
+                self.push16(bus, self.pc);
+                self.pc = addr;
+                Ok(16)
+            }
+            0xC9 => {
+                let addr = self.pop16(bus);
+                self.pc = addr;
+                Ok(16)
+            }
             0xC5 | 0xD5 | 0xE5 | 0xF5 => {
                 let reg = Reg16Stack::from_bits(opcode >> 4);
                 let value = self.read_reg16_stack(reg);
                 self.push16(bus, value);
                 Ok(16)
+            }
+            0xCD => {
+                let addr = self.fetch16(bus);
+                let ret_addr = self.pc;
+                self.push16(bus, ret_addr);
+                self.pc = addr;
+                Ok(24)
             }
             0xCE => {
                 let value = self.fetch8(bus);
@@ -1288,5 +1315,46 @@ mod tests {
         assert_eq!(cpu.regs().bc(), 0x1234);
         assert_eq!(cpu.regs().de(), 0x5678);
         assert_eq!(cpu.regs().hl(), 0x9ABC);
+    }
+
+    #[test]
+    fn cpu_call_and_ret() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0xCD;
+        rom[0x0001] = 0x05;
+        rom[0x0002] = 0x00;
+        rom[0x0003] = 0x00;
+        rom[0x0004] = 0x00;
+        rom[0x0005] = 0x00;
+        rom[0x0006] = 0xC9;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        let sp_start = cpu.sp();
+
+        cpu.step(&mut bus).expect("call a16");
+        assert_eq!(cpu.pc(), 0x0005);
+        assert_eq!(cpu.sp(), sp_start.wrapping_sub(2));
+        assert_eq!(bus.read8(cpu.sp()), 0x03);
+        assert_eq!(bus.read8(cpu.sp().wrapping_add(1)), 0x00);
+
+        cpu.step(&mut bus).expect("nop");
+        cpu.step(&mut bus).expect("ret");
+        assert_eq!(cpu.pc(), 0x0003);
+        assert_eq!(cpu.sp(), sp_start);
+    }
+
+    #[test]
+    fn cpu_rst_vectors() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0xFF;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        let sp_start = cpu.sp();
+
+        cpu.step(&mut bus).expect("rst 0x38");
+        assert_eq!(cpu.pc(), 0x0038);
+        assert_eq!(cpu.sp(), sp_start.wrapping_sub(2));
+        assert_eq!(bus.read8(cpu.sp()), 0x01);
+        assert_eq!(bus.read8(cpu.sp().wrapping_add(1)), 0x00);
     }
 }
