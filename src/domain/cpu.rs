@@ -210,6 +210,25 @@ impl Reg8 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reg16 {
+    BC,
+    DE,
+    HL,
+    SP,
+}
+
+impl Reg16 {
+    fn from_bits(bits: u8) -> Self {
+        match bits & 0x03 {
+            0 => Self::BC,
+            1 => Self::DE,
+            2 => Self::HL,
+            _ => Self::SP,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Cpu {
     regs: Registers,
@@ -316,16 +335,53 @@ impl Cpu {
                 self.regs.l = value;
                 Ok(8)
             }
+            0x09 | 0x19 | 0x29 | 0x39 => {
+                let reg = Reg16::from_bits(opcode >> 4);
+                let value = self.read_reg16(reg);
+                self.add_hl(value);
+                Ok(8)
+            }
+            0x22 => {
+                let addr = self.regs.hl();
+                bus.write8(addr, self.regs.a);
+                self.regs.set_hl(addr.wrapping_add(1));
+                Ok(8)
+            }
+            0x2A => {
+                let addr = self.regs.hl();
+                self.regs.a = bus.read8(addr);
+                self.regs.set_hl(addr.wrapping_add(1));
+                Ok(8)
+            }
             0x36 => {
                 let value = self.fetch8(bus);
                 let addr = self.regs.hl();
                 bus.write8(addr, value);
                 Ok(12)
             }
+            0x32 => {
+                let addr = self.regs.hl();
+                bus.write8(addr, self.regs.a);
+                self.regs.set_hl(addr.wrapping_sub(1));
+                Ok(8)
+            }
+            0x3A => {
+                let addr = self.regs.hl();
+                self.regs.a = bus.read8(addr);
+                self.regs.set_hl(addr.wrapping_sub(1));
+                Ok(8)
+            }
             0x3E => {
                 let value = self.fetch8(bus);
                 self.regs.a = value;
                 Ok(8)
+            }
+            0x40..=0x7F if opcode != 0x76 => {
+                let dst = Reg8::from_bits(opcode >> 3);
+                let src = Reg8::from_bits(opcode);
+                let value = self.read_reg8(src, bus);
+                self.write_reg8(dst, value, bus);
+                Ok(if dst.is_hl() || src.is_hl() { 8 } else { 4 })
             }
             0x80..=0x87 => {
                 let reg = Reg8::from_bits(opcode);
@@ -333,10 +389,22 @@ impl Cpu {
                 self.alu_add(value);
                 Ok(if reg.is_hl() { 8 } else { 4 })
             }
+            0x88..=0x8F => {
+                let reg = Reg8::from_bits(opcode);
+                let value = self.read_reg8(reg, bus);
+                self.alu_adc(value);
+                Ok(if reg.is_hl() { 8 } else { 4 })
+            }
             0x90..=0x97 => {
                 let reg = Reg8::from_bits(opcode);
                 let value = self.read_reg8(reg, bus);
                 self.alu_sub(value);
+                Ok(if reg.is_hl() { 8 } else { 4 })
+            }
+            0x98..=0x9F => {
+                let reg = Reg8::from_bits(opcode);
+                let value = self.read_reg8(reg, bus);
+                self.alu_sbc(value);
                 Ok(if reg.is_hl() { 8 } else { 4 })
             }
             0xA0..=0xA7 => {
@@ -387,9 +455,19 @@ impl Cpu {
                 self.pc = addr;
                 Ok(16)
             }
+            0xCE => {
+                let value = self.fetch8(bus);
+                self.alu_adc(value);
+                Ok(8)
+            }
             0xD6 => {
                 let value = self.fetch8(bus);
                 self.alu_sub(value);
+                Ok(8)
+            }
+            0xDE => {
+                let value = self.fetch8(bus);
+                self.alu_sbc(value);
                 Ok(8)
             }
             0xEA => {
@@ -468,6 +546,15 @@ impl Cpu {
         }
     }
 
+    fn read_reg16(&self, reg: Reg16) -> u16 {
+        match reg {
+            Reg16::BC => self.regs.bc(),
+            Reg16::DE => self.regs.de(),
+            Reg16::HL => self.regs.hl(),
+            Reg16::SP => self.sp,
+        }
+    }
+
     fn inc8(&mut self, value: u8) -> u8 {
         let next = value.wrapping_add(1);
         self.regs.set_flag_z(next == 0);
@@ -490,9 +577,22 @@ impl Cpu {
         self.regs.a = next;
         self.regs.set_flag_z(next == 0);
         self.regs.set_flag_n(false);
-        self.regs
-            .set_flag_h(((a & 0x0F) + (value & 0x0F)) > 0x0F);
+        self.regs.set_flag_h(((a & 0x0F) + (value & 0x0F)) > 0x0F);
         self.regs.set_flag_c(carry);
+    }
+
+    fn alu_adc(&mut self, value: u8) {
+        let carry_in = if self.regs.flag_c() { 1 } else { 0 };
+        let a = self.regs.a;
+        let (tmp, carry1) = a.overflowing_add(value);
+        let (next, carry2) = tmp.overflowing_add(carry_in);
+        self.regs.a = next;
+        self.regs.set_flag_z(next == 0);
+        self.regs.set_flag_n(false);
+        self.regs.set_flag_h(
+            ((a & 0x0F) + (value & 0x0F) + (carry_in as u8)) > 0x0F,
+        );
+        self.regs.set_flag_c(carry1 || carry2);
     }
 
     fn alu_sub(&mut self, value: u8) {
@@ -503,6 +603,31 @@ impl Cpu {
         self.regs.set_flag_n(true);
         self.regs.set_flag_h((a & 0x0F) < (value & 0x0F));
         self.regs.set_flag_c(borrow);
+    }
+
+    fn alu_sbc(&mut self, value: u8) {
+        let carry_in = if self.regs.flag_c() { 1 } else { 0 };
+        let a = self.regs.a;
+        let value_with_carry = (value as u16) + (carry_in as u16);
+        let result = (a as u16).wrapping_sub(value_with_carry);
+        let next = result as u8;
+        self.regs.a = next;
+        self.regs.set_flag_z(next == 0);
+        self.regs.set_flag_n(true);
+        self.regs
+            .set_flag_h((a & 0x0F) < ((value & 0x0F) + carry_in));
+        self.regs.set_flag_c((a as u16) < value_with_carry);
+    }
+
+    fn add_hl(&mut self, value: u16) {
+        let hl = self.regs.hl();
+        let result = hl.wrapping_add(value);
+        self.regs.set_flag_n(false);
+        self.regs
+            .set_flag_h(((hl & 0x0FFF) + (value & 0x0FFF)) > 0x0FFF);
+        self.regs
+            .set_flag_c((hl as u32 + value as u32) > 0xFFFF);
+        self.regs.set_hl(result);
     }
 
     fn alu_and(&mut self, value: u8) {
@@ -665,5 +790,94 @@ mod tests {
         assert!(!cpu.regs().flag_z());
         assert!(cpu.regs().flag_n());
         assert!(!cpu.regs().flag_c());
+    }
+
+    #[test]
+    fn cpu_adc_and_sbc_use_carry() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x3E;
+        rom[0x0001] = 0x0F;
+        rom[0x0002] = 0x06;
+        rom[0x0003] = 0x01;
+        rom[0x0004] = 0x88;
+        rom[0x0005] = 0x98;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+
+        cpu.regs_mut().set_flag_c(true);
+        cpu.step(&mut bus).expect("ld a,d8");
+        cpu.step(&mut bus).expect("ld b,d8");
+        cpu.step(&mut bus).expect("adc a,b");
+
+        assert_eq!(cpu.regs().a(), 0x11);
+        assert!(cpu.regs().flag_h());
+        assert!(!cpu.regs().flag_n());
+
+        cpu.regs_mut().set_flag_c(true);
+        cpu.step(&mut bus).expect("sbc a,b");
+
+        assert_eq!(cpu.regs().a(), 0x0F);
+        assert!(cpu.regs().flag_n());
+        assert!(cpu.regs().flag_h());
+        assert!(!cpu.regs().flag_c());
+    }
+
+    #[test]
+    fn cpu_ld_rr_and_hl_increment_decrement() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x77;
+        rom[0x0001] = 0x7E;
+        rom[0x0002] = 0x22;
+        rom[0x0003] = 0x2A;
+        rom[0x0004] = 0x32;
+        rom[0x0005] = 0x3A;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        cpu.regs_mut().set_hl(0xC000);
+        cpu.regs_mut().set_a(0x55);
+
+        cpu.step(&mut bus).expect("ld (hl),a");
+        assert_eq!(bus.read8(0xC000), 0x55);
+
+        bus.write8(0xC000, 0xAA);
+        cpu.step(&mut bus).expect("ld a,(hl)");
+        assert_eq!(cpu.regs().a(), 0xAA);
+
+        cpu.regs_mut().set_a(0x11);
+        cpu.step(&mut bus).expect("ld (hl+),a");
+        assert_eq!(cpu.regs().hl(), 0xC001);
+        assert_eq!(bus.read8(0xC000), 0x11);
+
+        bus.write8(0xC001, 0x22);
+        cpu.step(&mut bus).expect("ld a,(hl+)");
+        assert_eq!(cpu.regs().a(), 0x22);
+        assert_eq!(cpu.regs().hl(), 0xC002);
+
+        cpu.regs_mut().set_a(0x33);
+        cpu.step(&mut bus).expect("ld (hl-),a");
+        assert_eq!(cpu.regs().hl(), 0xC001);
+        assert_eq!(bus.read8(0xC002), 0x33);
+
+        bus.write8(0xC001, 0x44);
+        cpu.step(&mut bus).expect("ld a,(hl-)");
+        assert_eq!(cpu.regs().a(), 0x44);
+        assert_eq!(cpu.regs().hl(), 0xC000);
+    }
+
+    #[test]
+    fn cpu_add_hl_preserves_z_flag() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x09;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        cpu.regs_mut().set_hl(0x0FFF);
+        cpu.regs_mut().set_bc(0x0001);
+        cpu.regs_mut().set_flag_z(true);
+
+        cpu.step(&mut bus).expect("add hl,bc");
+        assert_eq!(cpu.regs().hl(), 0x1000);
+        assert!(cpu.regs().flag_z());
+        assert!(cpu.regs().flag_h());
+        assert!(!cpu.regs().flag_n());
     }
 }
