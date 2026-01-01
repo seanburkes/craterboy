@@ -10,9 +10,10 @@ pub fn run() {
     let mut args = std::env::args();
     let program = args.next().unwrap_or_else(|| "craterboy".to_string());
     let mut path: Option<PathBuf> = None;
+    let mut save_root: Option<PathBuf> = None;
     let mut verbose = false;
 
-    for arg in args {
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
                 print_usage(&program);
@@ -20,6 +21,17 @@ pub fn run() {
             }
             "-v" | "--verbose" => {
                 verbose = true;
+            }
+            "--save-root" => {
+                let Some(root) = args.next() else {
+                    print_usage(&program);
+                    std::process::exit(2);
+                };
+                if save_root.is_some() {
+                    print_usage(&program);
+                    std::process::exit(2);
+                }
+                save_root = Some(PathBuf::from(root));
             }
             _ => {
                 if path.is_some() {
@@ -34,9 +46,12 @@ pub fn run() {
     let path = match path {
         Some(path) => path,
         None => match app::load_auto_resume_path() {
-            Ok(Some(path)) => {
-                println!("Auto-resume: {}", path.display());
-                path
+            Ok(Some((resume_path, resume_root))) => {
+                if save_root.is_none() {
+                    save_root = resume_root;
+                }
+                println!("Auto-resume: {}", resume_path.display());
+                resume_path
             }
             Ok(None) => {
                 print_usage(&program);
@@ -50,10 +65,10 @@ pub fn run() {
         },
     };
 
-    match app::load_rom(&path) {
+    match app::load_rom_with_save_root(&path, save_root.as_deref()) {
         Ok(cartridge) => {
             print_report(&path, &cartridge, verbose);
-            if let Err(err) = app::save_auto_resume_for(path.clone()) {
+            if let Err(err) = app::save_auto_resume_for(path.clone(), save_root.clone()) {
                 eprintln!("Failed to save auto-resume metadata: {:?}", err);
             }
         }
@@ -277,7 +292,7 @@ fn licensee_label(licensee: &Licensee) -> String {
 }
 
 fn print_usage(program: &str) {
-    eprintln!("Usage: {} [--verbose] <rom-path>", program);
+    eprintln!("Usage: {} [--verbose] [--save-root <path>] <rom-path>", program);
 }
 
 fn print_header_bytes(bytes: &[u8]) {

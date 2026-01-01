@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::domain::Cartridge;
-use crate::infrastructure::rom_loader::{RomSaveError, save_battery_ram};
+use crate::infrastructure::rom_loader::{RomSaveError, save_battery_ram_with_root};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
@@ -10,6 +10,7 @@ pub struct SaveManager {
     inactivity: Duration,
     last_dirty_at: Option<Instant>,
     last_dirty_generation: u64,
+    save_root: Option<PathBuf>,
 }
 
 impl SaveManager {
@@ -18,6 +19,16 @@ impl SaveManager {
             inactivity,
             last_dirty_at: None,
             last_dirty_generation: 0,
+            save_root: None,
+        }
+    }
+
+    pub fn with_save_root(inactivity: Duration, save_root: impl Into<PathBuf>) -> Self {
+        Self {
+            inactivity,
+            last_dirty_at: None,
+            last_dirty_generation: 0,
+            save_root: Some(save_root.into()),
         }
     }
 
@@ -53,7 +64,7 @@ impl SaveManager {
             return Ok(false);
         }
 
-        save_battery_ram(path, cartridge)?;
+        save_battery_ram_with_root(path, self.save_root.as_deref(), cartridge)?;
         cartridge.clear_ram_dirty();
         self.last_dirty_at = None;
         Ok(true)
@@ -67,7 +78,7 @@ impl SaveManager {
         if !cartridge.is_ram_dirty() {
             return Ok(false);
         }
-        save_battery_ram(path, cartridge)?;
+        save_battery_ram_with_root(path, self.save_root.as_deref(), cartridge)?;
         cartridge.clear_ram_dirty();
         self.last_dirty_at = None;
         Ok(true)
@@ -77,18 +88,25 @@ impl SaveManager {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutoResumeMetadata {
     pub rom_path: PathBuf,
+    #[serde(default)]
+    pub save_root: Option<PathBuf>,
     pub state_path: Option<PathBuf>,
     pub saved_at_unix: u64,
 }
 
 impl AutoResumeMetadata {
     pub fn new(rom_path: impl Into<PathBuf>) -> Self {
+        Self::with_save_root(rom_path, None)
+    }
+
+    pub fn with_save_root(rom_path: impl Into<PathBuf>, save_root: Option<PathBuf>) -> Self {
         let saved_at_unix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         Self {
             rom_path: rom_path.into(),
+            save_root,
             state_path: None,
             saved_at_unix,
         }
@@ -190,13 +208,14 @@ mod tests {
     #[test]
     fn flushes_after_inactivity_and_clears_dirty() {
         let rom_path = unique_rom_path();
+        let save_root = unique_rom_path().with_extension("saves");
         let mut rom = vec![0; 0x0150];
         rom[0x0147] = 0x09;
         rom[0x0149] = 0x02;
         let mut cartridge = Cartridge::from_bytes(rom).expect("cartridge");
         cartridge.ram_mut()[0] = 0x5A;
 
-        let mut manager = SaveManager::new(Duration::from_secs(5));
+        let mut manager = SaveManager::with_save_root(Duration::from_secs(5), &save_root);
         let start = Instant::now();
         assert!(
             !manager
@@ -211,11 +230,12 @@ mod tests {
         );
         assert!(!cartridge.is_ram_dirty());
 
-        let save_path = save_path_for_rom(&rom_path);
+        let save_path = save_path_for_rom(&rom_path, Some(&save_root));
         let saved = std::fs::read(&save_path).expect("save read");
         assert_eq!(saved[0], 0x5A);
 
         let _ = std::fs::remove_file(&save_path);
+        let _ = std::fs::remove_dir_all(&save_root);
     }
 
     #[test]
