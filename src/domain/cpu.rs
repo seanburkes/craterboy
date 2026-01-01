@@ -277,6 +277,7 @@ pub struct Cpu {
     sp: u16,
     ime: bool,
     ime_delay: u8,
+    halt_bug: bool,
     halted: bool,
     stopped: bool,
 }
@@ -289,6 +290,7 @@ impl Cpu {
             sp: 0xFFFE,
             ime: false,
             ime_delay: 0,
+            halt_bug: false,
             halted: false,
             stopped: false,
         }
@@ -587,7 +589,12 @@ impl Cpu {
                 }
             }
             0x76 => {
-                self.halted = true;
+                let pending = self.pending_interrupts(bus);
+                if self.ime || pending == 0 {
+                    self.halted = true;
+                } else {
+                    self.halt_bug = true;
+                }
                 Ok(4)
             }
             0x10 => {
@@ -781,7 +788,11 @@ impl Cpu {
 
     fn fetch8(&mut self, bus: &mut Bus) -> u8 {
         let value = bus.read8(self.pc);
-        self.pc = self.pc.wrapping_add(1);
+        if self.halt_bug {
+            self.halt_bug = false;
+        } else {
+            self.pc = self.pc.wrapping_add(1);
+        }
         value
     }
 
@@ -1019,7 +1030,7 @@ impl Cpu {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cpu, Registers, REG_IE, REG_IF};
+    use super::{Cpu, REG_IE, REG_IF, Registers};
     use crate::domain::Bus;
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
@@ -1537,6 +1548,25 @@ mod tests {
         bus.write8(REG_IF, 0x01);
         let cycles = cpu.step(&mut bus).expect("nop");
         assert_eq!(cycles, 4);
+        assert_eq!(cpu.pc(), 0x0002);
+    }
+
+    #[test]
+    fn cpu_halt_bug_reuses_opcode_byte() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x76;
+        rom[0x0001] = 0x3E;
+        rom[0x0002] = 0x12;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        bus.write8(REG_IE, 0x01);
+        bus.write8(REG_IF, 0x01);
+
+        cpu.step(&mut bus).expect("halt");
+        assert_eq!(cpu.pc(), 0x0001);
+
+        cpu.step(&mut bus).expect("ld a,d8");
+        assert_eq!(cpu.regs().a(), 0x3E);
         assert_eq!(cpu.pc(), 0x0002);
     }
 

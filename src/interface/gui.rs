@@ -8,7 +8,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
 use crate::application::app;
-use crate::domain::{Emulator, FRAME_HEIGHT, FRAME_SIZE, FRAME_WIDTH};
+use crate::domain::{Cartridge, Emulator, FRAME_HEIGHT, FRAME_SIZE, FRAME_WIDTH};
 use crate::infrastructure::rom_loader::RomLoadError;
 
 const FRAME_WIDTH_U32: u32 = FRAME_WIDTH as u32;
@@ -28,7 +28,8 @@ pub fn run(rom_path: Option<PathBuf>) {
 }
 
 async fn run_async(rom_path: Option<PathBuf>) {
-    let rom_bytes = load_rom_bytes(rom_path);
+    let cartridge = load_rom_cartridge(rom_path);
+    let rom_bytes = cartridge.as_ref().map(|cart| cart.bytes.clone());
     let event_loop = EventLoop::new().expect("event loop");
     let window = Arc::new(
         WindowBuilder::new()
@@ -47,7 +48,7 @@ async fn run_async(rom_path: Option<PathBuf>) {
     let surface = instance
         .create_surface(Arc::clone(&window))
         .expect("surface");
-    let mut state = State::new(instance, surface, size, rom_bytes).await;
+    let mut state = State::new(instance, surface, size, cartridge, rom_bytes).await;
     let frame_interval = Duration::from_nanos(1_000_000_000 / 60);
     let mut next_frame = Instant::now();
     let mut fps_last = Instant::now();
@@ -92,7 +93,7 @@ async fn run_async(rom_path: Option<PathBuf>) {
     });
 }
 
-fn load_rom_bytes(path: Option<PathBuf>) -> Option<Vec<u8>> {
+fn load_rom_cartridge(path: Option<PathBuf>) -> Option<Cartridge> {
     let mut path = path;
     if path.is_none() {
         if let Ok(Some((resume_path, _))) = app::load_auto_resume_path() {
@@ -105,7 +106,7 @@ fn load_rom_bytes(path: Option<PathBuf>) -> Option<Vec<u8>> {
     };
 
     match app::load_rom(&path) {
-        Ok(cartridge) => Some(cartridge.bytes),
+        Ok(cartridge) => Some(cartridge),
         Err(err) => {
             report_rom_error(&path, err);
             None
@@ -157,6 +158,7 @@ impl State {
         instance: wgpu::Instance,
         surface: wgpu::Surface<'static>,
         size: PhysicalSize<u32>,
+        cartridge: Option<Cartridge>,
         rom_bytes: Option<Vec<u8>>,
     ) -> Self {
         let adapter = instance
@@ -296,6 +298,13 @@ impl State {
             multiview: None,
         });
 
+        let mut emulator = Emulator::new();
+        if let Some(cartridge) = cartridge {
+            if let Err(err) = emulator.load_cartridge(cartridge) {
+                eprintln!("Failed to initialize cartridge: {:?}", err);
+            }
+        }
+
         Self {
             surface,
             device,
@@ -307,7 +316,7 @@ impl State {
             _texture_sampler: texture_sampler,
             bind_group,
             pipeline,
-            emulator: Emulator::new(),
+            emulator,
             frame_index: 0,
             rom_bytes,
             rom_frame_ready: false,
@@ -325,6 +334,7 @@ impl State {
     }
 
     fn update_frame(&mut self) {
+        let _ = self.emulator.step_frame();
         if let Some(rom) = self.rom_bytes.as_deref() {
             if !self.rom_frame_ready {
                 Self::render_rom_tiles(self.emulator.framebuffer_mut().as_mut_slice(), rom);
