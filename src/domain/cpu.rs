@@ -218,6 +218,25 @@ enum Reg16 {
     SP,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reg16Stack {
+    BC,
+    DE,
+    HL,
+    AF,
+}
+
+impl Reg16Stack {
+    fn from_bits(bits: u8) -> Self {
+        match bits & 0x03 {
+            0 => Self::BC,
+            1 => Self::DE,
+            2 => Self::HL,
+            _ => Self::AF,
+        }
+    }
+}
+
 impl Reg16 {
     fn from_bits(bits: u8) -> Self {
         match bits & 0x03 {
@@ -450,6 +469,12 @@ impl Cpu {
                 self.regs.a = value;
                 Ok(8)
             }
+            0xC1 | 0xD1 | 0xE1 | 0xF1 => {
+                let reg = Reg16Stack::from_bits(opcode >> 4);
+                let value = self.pop16(bus);
+                self.write_reg16_stack(reg, value);
+                Ok(12)
+            }
             0x40..=0x7F if opcode != 0x76 => {
                 let dst = Reg8::from_bits(opcode >> 3);
                 let src = Reg8::from_bits(opcode);
@@ -527,6 +552,12 @@ impl Cpu {
             0xC3 => {
                 let addr = self.fetch16(bus);
                 self.pc = addr;
+                Ok(16)
+            }
+            0xC5 | 0xD5 | 0xE5 | 0xF5 => {
+                let reg = Reg16Stack::from_bits(opcode >> 4);
+                let value = self.read_reg16_stack(reg);
+                self.push16(bus, value);
                 Ok(16)
             }
             0xCE => {
@@ -665,6 +696,40 @@ impl Cpu {
             Reg16::HL => self.regs.hl(),
             Reg16::SP => self.sp,
         }
+    }
+
+    fn read_reg16_stack(&self, reg: Reg16Stack) -> u16 {
+        match reg {
+            Reg16Stack::BC => self.regs.bc(),
+            Reg16Stack::DE => self.regs.de(),
+            Reg16Stack::HL => self.regs.hl(),
+            Reg16Stack::AF => self.regs.af(),
+        }
+    }
+
+    fn write_reg16_stack(&mut self, reg: Reg16Stack, value: u16) {
+        match reg {
+            Reg16Stack::BC => self.regs.set_bc(value),
+            Reg16Stack::DE => self.regs.set_de(value),
+            Reg16Stack::HL => self.regs.set_hl(value),
+            Reg16Stack::AF => self.regs.set_af(value),
+        }
+    }
+
+    fn push16(&mut self, bus: &mut Bus, value: u16) {
+        let [hi, lo] = value.to_be_bytes();
+        self.sp = self.sp.wrapping_sub(1);
+        bus.write8(self.sp, hi);
+        self.sp = self.sp.wrapping_sub(1);
+        bus.write8(self.sp, lo);
+    }
+
+    fn pop16(&mut self, bus: &Bus) -> u16 {
+        let lo = bus.read8(self.sp);
+        let sp_next = self.sp.wrapping_add(1);
+        let hi = bus.read8(sp_next);
+        self.sp = self.sp.wrapping_add(2);
+        u16::from_be_bytes([hi, lo])
     }
 
     fn inc8(&mut self, value: u8) -> u8 {
@@ -1175,5 +1240,53 @@ mod tests {
         bus.write8(0xFF10, 0x55);
         cpu.step(&mut bus).expect("ld a,(c)");
         assert_eq!(cpu.regs().a(), 0x55);
+    }
+
+    #[test]
+    fn cpu_push_pop_stack() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x01;
+        rom[0x0001] = 0x34;
+        rom[0x0002] = 0x12;
+        rom[0x0003] = 0x11;
+        rom[0x0004] = 0x78;
+        rom[0x0005] = 0x56;
+        rom[0x0006] = 0x21;
+        rom[0x0007] = 0xBC;
+        rom[0x0008] = 0x9A;
+        rom[0x0009] = 0xF5;
+        rom[0x000A] = 0xC5;
+        rom[0x000B] = 0xD5;
+        rom[0x000C] = 0xE5;
+        rom[0x000D] = 0xE1;
+        rom[0x000E] = 0xD1;
+        rom[0x000F] = 0xC1;
+        rom[0x0010] = 0xF1;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        cpu.regs_mut().set_a(0xF0);
+        cpu.regs_mut().set_flag_c(true);
+        let sp_start = cpu.sp();
+
+        cpu.step(&mut bus).expect("ld bc,d16");
+        cpu.step(&mut bus).expect("ld de,d16");
+        cpu.step(&mut bus).expect("ld hl,d16");
+        cpu.step(&mut bus).expect("push af");
+        cpu.step(&mut bus).expect("push bc");
+        cpu.step(&mut bus).expect("push de");
+        cpu.step(&mut bus).expect("push hl");
+
+        assert_eq!(cpu.sp(), sp_start.wrapping_sub(8));
+
+        cpu.step(&mut bus).expect("pop hl");
+        cpu.step(&mut bus).expect("pop de");
+        cpu.step(&mut bus).expect("pop bc");
+        cpu.step(&mut bus).expect("pop af");
+
+        assert_eq!(cpu.sp(), sp_start);
+        assert_eq!(cpu.regs().af(), 0xF010);
+        assert_eq!(cpu.regs().bc(), 0x1234);
+        assert_eq!(cpu.regs().de(), 0x5678);
+        assert_eq!(cpu.regs().hl(), 0x9ABC);
     }
 }
