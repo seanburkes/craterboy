@@ -544,6 +544,12 @@ impl Cpu {
                 self.alu_sbc(value);
                 Ok(8)
             }
+            0xE0 => {
+                let offset = self.fetch8(bus);
+                let addr = 0xFF00u16.wrapping_add(offset as u16);
+                bus.write8(addr, self.regs.a);
+                Ok(12)
+            }
             0xEA => {
                 let addr = self.fetch16(bus);
                 bus.write8(addr, self.regs.a);
@@ -565,10 +571,21 @@ impl Cpu {
                 self.sp = result;
                 Ok(16)
             }
+            0xE2 => {
+                let addr = 0xFF00u16.wrapping_add(self.regs.c as u16);
+                bus.write8(addr, self.regs.a);
+                Ok(8)
+            }
             0xFA => {
                 let addr = self.fetch16(bus);
                 self.regs.a = bus.read8(addr);
                 Ok(16)
+            }
+            0xF0 => {
+                let offset = self.fetch8(bus);
+                let addr = 0xFF00u16.wrapping_add(offset as u16);
+                self.regs.a = bus.read8(addr);
+                Ok(12)
             }
             0xF6 => {
                 let value = self.fetch8(bus);
@@ -580,6 +597,11 @@ impl Cpu {
                 let result = self.add_sp_offset(offset);
                 self.regs.set_hl(result);
                 Ok(12)
+            }
+            0xF2 => {
+                let addr = 0xFF00u16.wrapping_add(self.regs.c as u16);
+                self.regs.a = bus.read8(addr);
+                Ok(8)
             }
             0x3B => {
                 self.sp = self.sp.wrapping_sub(1);
@@ -1118,5 +1140,40 @@ mod tests {
         assert_eq!(cpu.regs().hl(), 0xFFF8);
         assert!(!cpu.regs().flag_c());
         assert!(!cpu.regs().flag_h());
+    }
+
+    #[test]
+    fn cpu_ldh_immediate_and_c() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x3E;
+        rom[0x0001] = 0x77;
+        rom[0x0002] = 0xE0;
+        rom[0x0003] = 0x42;
+        rom[0x0004] = 0xF0;
+        rom[0x0005] = 0x42;
+        rom[0x0006] = 0x0E;
+        rom[0x0007] = 0x10;
+        rom[0x0008] = 0x3E;
+        rom[0x0009] = 0x99;
+        rom[0x000A] = 0xE2;
+        rom[0x000B] = 0xF2;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+
+        cpu.step(&mut bus).expect("ld a,d8");
+        cpu.step(&mut bus).expect("ldh (a8),a");
+        assert_eq!(bus.read8(0xFF42), 0x77);
+
+        cpu.step(&mut bus).expect("ldh a,(a8)");
+        assert_eq!(cpu.regs().a(), 0x77);
+
+        cpu.step(&mut bus).expect("ld c,d8");
+        cpu.step(&mut bus).expect("ld a,d8");
+        cpu.step(&mut bus).expect("ld (c),a");
+        assert_eq!(bus.read8(0xFF10), 0x99);
+
+        bus.write8(0xFF10, 0x55);
+        cpu.step(&mut bus).expect("ld a,(c)");
+        assert_eq!(cpu.regs().a(), 0x55);
     }
 }
