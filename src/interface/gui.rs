@@ -6,10 +6,11 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
 use crate::application::app;
+use crate::domain::{Emulator, FRAME_HEIGHT, FRAME_SIZE, FRAME_WIDTH};
 use crate::infrastructure::rom_loader::RomLoadError;
 
-const FRAME_WIDTH: u32 = 160;
-const FRAME_HEIGHT: u32 = 144;
+const FRAME_WIDTH_U32: u32 = FRAME_WIDTH as u32;
+const FRAME_HEIGHT_U32: u32 = FRAME_HEIGHT as u32;
 const TILE_SIZE: usize = 8;
 const TILE_BYTES: usize = 16;
 const TILE_DATA_OFFSET: usize = 0x0000;
@@ -121,7 +122,7 @@ struct State {
     _texture_sampler: wgpu::Sampler,
     bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
-    framebuffer: Vec<u8>,
+    emulator: Emulator,
     frame_index: u8,
     rom_bytes: Option<Vec<u8>>,
     rom_frame_ready: bool,
@@ -177,8 +178,8 @@ impl State {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("framebuffer"),
             size: wgpu::Extent3d {
-                width: FRAME_WIDTH,
-                height: FRAME_HEIGHT,
+                width: FRAME_WIDTH_U32,
+                height: FRAME_HEIGHT_U32,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -271,8 +272,6 @@ impl State {
             multiview: None,
         });
 
-        let framebuffer = vec![0; (FRAME_WIDTH * FRAME_HEIGHT * 4) as usize];
-
         Self {
             surface,
             device,
@@ -284,7 +283,7 @@ impl State {
             _texture_sampler: texture_sampler,
             bind_group,
             pipeline,
-            framebuffer,
+            emulator: Emulator::new(),
             frame_index: 0,
             rom_bytes,
             rom_frame_ready: false,
@@ -304,38 +303,37 @@ impl State {
     fn update_frame(&mut self) {
         if let Some(rom) = self.rom_bytes.as_deref() {
             if !self.rom_frame_ready {
-                Self::render_rom_tiles(&mut self.framebuffer, rom);
+                Self::render_rom_tiles(self.emulator.framebuffer_mut().as_mut_slice(), rom);
                 self.rom_frame_ready = true;
             }
             return;
         }
 
         self.frame_index = self.frame_index.wrapping_add(1);
-        let width = FRAME_WIDTH as usize;
-        let height = FRAME_HEIGHT as usize;
+        let width = FRAME_WIDTH;
+        let height = FRAME_HEIGHT;
+        let pixels = self.emulator.framebuffer_mut().as_mut_slice();
         for y in 0..height {
             for x in 0..width {
-                let idx = (y * width + x) * 4;
+                let idx = (y * width + x) * 3;
                 let r = (x as u8).wrapping_add(self.frame_index);
                 let g = (y as u8).wrapping_add(self.frame_index);
                 let b = (x as u8).wrapping_add(y as u8);
-                self.framebuffer[idx] = r;
-                self.framebuffer[idx + 1] = g;
-                self.framebuffer[idx + 2] = b;
-                self.framebuffer[idx + 3] = 0xFF;
+                pixels[idx] = r;
+                pixels[idx + 1] = g;
+                pixels[idx + 2] = b;
             }
         }
     }
 
     fn render_rom_tiles(framebuffer: &mut [u8], rom: &[u8]) {
-        let width = FRAME_WIDTH as usize;
-        let height = FRAME_HEIGHT as usize;
+        let width = FRAME_WIDTH;
+        let height = FRAME_HEIGHT;
         let bg = DMG_PALETTE[0];
-        for idx in (0..framebuffer.len()).step_by(4) {
+        for idx in (0..framebuffer.len()).step_by(3) {
             framebuffer[idx] = bg[0];
             framebuffer[idx + 1] = bg[1];
             framebuffer[idx + 2] = bg[2];
-            framebuffer[idx + 3] = 0xFF;
         }
 
         let tiles_per_row = width / TILE_SIZE;
@@ -355,7 +353,7 @@ impl State {
     }
 
     fn draw_tile(framebuffer: &mut [u8], tile: &[u8], tile_x: usize, tile_y: usize) {
-        let width = FRAME_WIDTH as usize;
+        let width = FRAME_WIDTH;
         for row in 0..TILE_SIZE {
             let lo = tile[row * 2];
             let hi = tile[row * 2 + 1];
@@ -365,17 +363,17 @@ impl State {
                 let color = DMG_PALETTE[color_index as usize];
                 let x = tile_x + col;
                 let y = tile_y + row;
-                let idx = (y * width + x) * 4;
+                let idx = (y * width + x) * 3;
                 framebuffer[idx] = color[0];
                 framebuffer[idx + 1] = color[1];
                 framebuffer[idx + 2] = color[2];
-                framebuffer[idx + 3] = 0xFF;
             }
         }
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let (padded, bytes_per_row) = pad_framebuffer(&self.framebuffer);
+        let (padded, bytes_per_row) =
+            prepare_framebuffer_upload(self.emulator.framebuffer().as_slice());
 
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
@@ -388,11 +386,11 @@ impl State {
             wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
-                rows_per_image: Some(FRAME_HEIGHT),
+                rows_per_image: Some(FRAME_HEIGHT_U32),
             },
             wgpu::Extent3d {
-                width: FRAME_WIDTH,
-                height: FRAME_HEIGHT,
+                width: FRAME_WIDTH_U32,
+                height: FRAME_HEIGHT_U32,
                 depth_or_array_layers: 1,
             },
         );
@@ -438,17 +436,27 @@ impl State {
     }
 }
 
-fn pad_framebuffer(frame: &[u8]) -> (Vec<u8>, u32) {
-    let width = FRAME_WIDTH as usize;
-    let height = FRAME_HEIGHT as usize;
+fn prepare_framebuffer_upload(frame: &[u8]) -> (Vec<u8>, u32) {
+    let width = FRAME_WIDTH;
+    let height = FRAME_HEIGHT;
+    if frame.len() != FRAME_SIZE {
+        return (vec![0u8; width * height * 4], (width * 4) as u32);
+    }
     let unpadded = width * 4;
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
     let padded = ((unpadded + align - 1) / align) * align;
     let mut data = vec![0u8; padded * height];
     for y in 0..height {
-        let src = y * unpadded;
+        let src = y * width * 3;
         let dst = y * padded;
-        data[dst..dst + unpadded].copy_from_slice(&frame[src..src + unpadded]);
+        for x in 0..width {
+            let src_px = src + x * 3;
+            let dst_px = dst + x * 4;
+            data[dst_px] = frame[src_px];
+            data[dst_px + 1] = frame[src_px + 1];
+            data[dst_px + 2] = frame[src_px + 2];
+            data[dst_px + 3] = 0xFF;
+        }
     }
     (data, padded as u32)
 }
