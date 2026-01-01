@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
@@ -28,11 +30,13 @@ pub fn run(rom_path: Option<PathBuf>) {
 async fn run_async(rom_path: Option<PathBuf>) {
     let rom_bytes = load_rom_bytes(rom_path);
     let event_loop = EventLoop::new().expect("event loop");
-    let window = WindowBuilder::new()
-        .with_title("craterboy")
-        .with_inner_size(PhysicalSize::new(640, 576))
-        .build(&event_loop)
-        .expect("window");
+    let window = Arc::new(
+        WindowBuilder::new()
+            .with_title("craterboy")
+            .with_inner_size(PhysicalSize::new(640, 576))
+            .build(&event_loop)
+            .expect("window"),
+    );
 
     let target_window_id = window.id();
     let size = window.inner_size();
@@ -40,28 +44,41 @@ async fn run_async(rom_path: Option<PathBuf>) {
         backends: wgpu::Backends::PRIMARY,
         ..Default::default()
     });
-    let surface = instance.create_surface(window).expect("surface");
+    let surface = instance
+        .create_surface(Arc::clone(&window))
+        .expect("surface");
     let mut state = State::new(instance, surface, size, rom_bytes).await;
+    let frame_interval = Duration::from_nanos(1_000_000_000 / 60);
+    let mut next_frame = Instant::now();
 
     let _ = event_loop.run(move |event, elwt| {
-        elwt.set_control_flow(ControlFlow::Poll);
-
         match event {
-            Event::WindowEvent { event, window_id } if window_id == target_window_id => match event
-            {
-                WindowEvent::CloseRequested => elwt.exit(),
-                WindowEvent::Resized(size) => state.resize(size),
-                _ => {}
-            },
-            Event::AboutToWait => {
-                state.update_frame();
-                match state.render() {
-                    Ok(()) => {}
-                    Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
-                    Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                    Err(wgpu::SurfaceError::Outdated) => {}
-                    Err(wgpu::SurfaceError::Timeout) => {}
+            Event::WindowEvent { event, window_id } if window_id == target_window_id => {
+                match event {
+                    WindowEvent::CloseRequested => elwt.exit(),
+                    WindowEvent::Resized(size) => state.resize(size),
+                    WindowEvent::RedrawRequested => {
+                        state.update_frame();
+                        match state.render() {
+                            Ok(()) => {}
+                            Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
+                            Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                            Err(wgpu::SurfaceError::Outdated) => {}
+                            Err(wgpu::SurfaceError::Timeout) => {}
+                        }
+                    }
+                    _ => {}
                 }
+            }
+            Event::AboutToWait => {
+                let now = Instant::now();
+                if now >= next_frame {
+                    while next_frame <= now {
+                        next_frame += frame_interval;
+                    }
+                    window.request_redraw();
+                }
+                elwt.set_control_flow(ControlFlow::WaitUntil(next_frame));
             }
             _ => {}
         }
