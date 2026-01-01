@@ -74,7 +74,10 @@ fn mbc2_fixture_rom_and_ram_rules() {
 #[test]
 fn mbc3_rtc_fixture_ticks_seconds() {
     let cartridge = load_fixture("mbc3_rtc_128k.gb");
-    assert_eq!(cartridge.header.cartridge_type, CartridgeType::Mbc3TimerRamBattery);
+    assert_eq!(
+        cartridge.header.cartridge_type,
+        CartridgeType::Mbc3TimerRamBattery
+    );
     assert_eq!(cartridge.header.rom_size, RomSize::Kb128);
 
     let mut bus = Bus::new(cartridge).expect("bus");
@@ -89,7 +92,10 @@ fn mbc3_rtc_fixture_ticks_seconds() {
 #[test]
 fn mbc5_fixture_switches_rom_banks() {
     let cartridge = load_fixture("mbc5_128k.gb");
-    assert_eq!(cartridge.header.cartridge_type, CartridgeType::Mbc5RamBattery);
+    assert_eq!(
+        cartridge.header.cartridge_type,
+        CartridgeType::Mbc5RamBattery
+    );
     assert_eq!(cartridge.header.rom_size, RomSize::Kb128);
 
     let mut bus = Bus::new(cartridge).expect("bus");
