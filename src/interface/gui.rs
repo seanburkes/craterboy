@@ -50,38 +50,45 @@ async fn run_async(rom_path: Option<PathBuf>) {
     let mut state = State::new(instance, surface, size, rom_bytes).await;
     let frame_interval = Duration::from_nanos(1_000_000_000 / 60);
     let mut next_frame = Instant::now();
+    let mut fps_last = Instant::now();
+    let mut fps_frames: u32 = 0;
 
-    let _ = event_loop.run(move |event, elwt| {
-        match event {
-            Event::WindowEvent { event, window_id } if window_id == target_window_id => {
-                match event {
-                    WindowEvent::CloseRequested => elwt.exit(),
-                    WindowEvent::Resized(size) => state.resize(size),
-                    WindowEvent::RedrawRequested => {
-                        state.update_frame();
-                        match state.render() {
-                            Ok(()) => {}
-                            Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
-                            Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                            Err(wgpu::SurfaceError::Outdated) => {}
-                            Err(wgpu::SurfaceError::Timeout) => {}
-                        }
-                    }
-                    _ => {}
+    let _ = event_loop.run(move |event, elwt| match event {
+        Event::WindowEvent { event, window_id } if window_id == target_window_id => match event {
+            WindowEvent::CloseRequested => elwt.exit(),
+            WindowEvent::Resized(size) => state.resize(size),
+            WindowEvent::RedrawRequested => {
+                state.update_frame();
+                match state.render() {
+                    Ok(()) => {}
+                    Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
+                    Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                    Err(wgpu::SurfaceError::Outdated) => {}
+                    Err(wgpu::SurfaceError::Timeout) => {}
                 }
-            }
-            Event::AboutToWait => {
+                fps_frames = fps_frames.saturating_add(1);
                 let now = Instant::now();
-                if now >= next_frame {
-                    while next_frame <= now {
-                        next_frame += frame_interval;
-                    }
-                    window.request_redraw();
+                let elapsed = now.duration_since(fps_last);
+                if elapsed >= Duration::from_secs(1) {
+                    let fps = fps_frames as f64 / elapsed.as_secs_f64();
+                    println!("FPS: {:.1}", fps);
+                    fps_frames = 0;
+                    fps_last = now;
                 }
-                elwt.set_control_flow(ControlFlow::WaitUntil(next_frame));
             }
             _ => {}
+        },
+        Event::AboutToWait => {
+            let now = Instant::now();
+            if now >= next_frame {
+                while next_frame <= now {
+                    next_frame += frame_interval;
+                }
+                window.request_redraw();
+            }
+            elwt.set_control_flow(ControlFlow::WaitUntil(next_frame));
         }
+        _ => {}
     });
 }
 
