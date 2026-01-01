@@ -1,5 +1,6 @@
 pub mod bus;
 pub mod cartridge;
+pub mod cpu;
 pub mod emulator;
 pub mod framebuffer;
 pub mod mbc;
@@ -7,6 +8,7 @@ pub mod rom;
 
 pub use bus::Bus;
 pub use cartridge::{Cartridge, RomBankMapping, RomBankView};
+pub use cpu::{Cpu, CpuError, Registers};
 pub use emulator::Emulator;
 pub use framebuffer::{FRAME_CHANNELS, FRAME_HEIGHT, FRAME_SIZE, FRAME_WIDTH, Framebuffer};
 pub use mbc::{Mbc, MbcError, RtcMode};
