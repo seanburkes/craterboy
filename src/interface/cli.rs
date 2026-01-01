@@ -292,7 +292,10 @@ fn licensee_label(licensee: &Licensee) -> String {
 }
 
 fn print_usage(program: &str) {
-    eprintln!("Usage: {} [--verbose] [--save-root <path>] <rom-path>", program);
+    eprintln!(
+        "Usage: {} [--verbose] [--save-root <path>] <rom-path>",
+        program
+    );
 }
 
 fn print_header_bytes(bytes: &[u8]) {
