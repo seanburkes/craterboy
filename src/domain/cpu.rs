@@ -4,6 +4,9 @@ const FLAG_Z: u8 = 0x80;
 const FLAG_N: u8 = 0x40;
 const FLAG_H: u8 = 0x20;
 const FLAG_C: u8 = 0x10;
+const REG_IF: u16 = 0xFF0F;
+const REG_IE: u16 = 0xFFFF;
+const INTERRUPT_MASK: u8 = 0x1F;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Registers {
@@ -273,6 +276,7 @@ pub struct Cpu {
     pc: u16,
     sp: u16,
     ime: bool,
+    ime_delay: u8,
     halted: bool,
     stopped: bool,
 }
@@ -284,6 +288,7 @@ impl Cpu {
             pc: 0x0000,
             sp: 0xFFFE,
             ime: false,
+            ime_delay: 0,
             halted: false,
             stopped: false,
         }
@@ -319,15 +324,32 @@ impl Cpu {
 
     pub fn set_ime(&mut self, value: bool) {
         self.ime = value;
+        if !value {
+            self.ime_delay = 0;
+        }
     }
 
     pub fn step(&mut self, bus: &mut Bus) -> Result<u32, CpuError> {
+        let pending = self.pending_interrupts(bus);
+        if pending != 0 {
+            if self.halted {
+                self.halted = false;
+                if !self.ime {
+                    return Ok(4);
+                }
+            }
+            if self.ime {
+                let cycles = self.service_interrupt(bus, pending);
+                return Ok(cycles);
+            }
+        }
+
         if self.halted || self.stopped {
             return Ok(4);
         }
 
         let opcode = self.fetch8(bus);
-        match opcode {
+        let cycles = match opcode {
             0x00 => Ok(4),
             0x01 => {
                 let value = self.fetch16(bus);
@@ -663,6 +685,11 @@ impl Cpu {
                 self.alu_sbc(value);
                 Ok(8)
             }
+            0xF3 => {
+                self.ime = false;
+                self.ime_delay = 0;
+                Ok(4)
+            }
             0xE0 => {
                 let offset = self.fetch8(bus);
                 let addr = 0xFF00u16.wrapping_add(offset as u16);
@@ -722,6 +749,10 @@ impl Cpu {
                 self.regs.a = bus.read8(addr);
                 Ok(8)
             }
+            0xFB => {
+                self.ime_delay = 2;
+                Ok(4)
+            }
             0x3B => {
                 self.sp = self.sp.wrapping_sub(1);
                 Ok(8)
@@ -736,7 +767,16 @@ impl Cpu {
                 Err(CpuError::UnimplementedCbOpcode(opcode))
             }
             _ => Err(CpuError::UnimplementedOpcode(opcode)),
+        };
+
+        if cycles.is_ok() && self.ime_delay > 0 {
+            self.ime_delay = self.ime_delay.saturating_sub(1);
+            if self.ime_delay == 0 {
+                self.ime = true;
+            }
         }
+
+        cycles
     }
 
     fn fetch8(&mut self, bus: &mut Bus) -> u8 {
@@ -915,6 +955,31 @@ impl Cpu {
         }
     }
 
+    fn pending_interrupts(&self, bus: &Bus) -> u8 {
+        let ie = bus.read8(REG_IE);
+        let iflag = bus.read8(REG_IF);
+        ie & iflag & INTERRUPT_MASK
+    }
+
+    fn service_interrupt(&mut self, bus: &mut Bus, pending: u8) -> u32 {
+        let bit = pending.trailing_zeros() as u8;
+        let mask = 1u8 << bit;
+        let addr = match bit {
+            0 => 0x0040,
+            1 => 0x0048,
+            2 => 0x0050,
+            3 => 0x0058,
+            _ => 0x0060,
+        };
+        let iflag = bus.read8(REG_IF);
+        bus.write8(REG_IF, iflag & !mask);
+        self.ime = false;
+        self.ime_delay = 0;
+        self.push16(bus, self.pc);
+        self.pc = addr;
+        20
+    }
+
     fn alu_and(&mut self, value: u8) {
         let next = self.regs.a & value;
         self.regs.a = next;
@@ -954,7 +1019,7 @@ impl Cpu {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cpu, Registers};
+    use super::{Cpu, Registers, REG_IE, REG_IF};
     use crate::domain::Bus;
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
@@ -1426,6 +1491,53 @@ mod tests {
         assert_eq!(cpu.sp(), sp_start.wrapping_sub(2));
         assert_eq!(bus.read8(cpu.sp()), 0x01);
         assert_eq!(bus.read8(cpu.sp().wrapping_add(1)), 0x00);
+    }
+
+    #[test]
+    fn cpu_ei_delay_and_interrupt_service() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0xFB;
+        rom[0x0001] = 0x00;
+        rom[0x0002] = 0x00;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        bus.write8(REG_IE, 0x01);
+        bus.write8(REG_IF, 0x01);
+
+        cpu.step(&mut bus).expect("ei");
+        assert!(!cpu.ime());
+
+        cpu.step(&mut bus).expect("nop");
+        assert!(cpu.ime());
+
+        let sp_start = cpu.sp();
+        let cycles = cpu.step(&mut bus).expect("interrupt");
+        assert_eq!(cycles, 20);
+        assert_eq!(cpu.pc(), 0x0040);
+        assert!(!cpu.ime());
+        assert_eq!(cpu.sp(), sp_start.wrapping_sub(2));
+        assert_eq!(bus.read8(cpu.sp()), 0x02);
+        assert_eq!(bus.read8(cpu.sp().wrapping_add(1)), 0x00);
+        assert_eq!(bus.read8(REG_IF) & 0x01, 0x00);
+    }
+
+    #[test]
+    fn cpu_di_disables_interrupts() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0xF3;
+        rom[0x0001] = 0x00;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        cpu.set_ime(true);
+
+        cpu.step(&mut bus).expect("di");
+        assert!(!cpu.ime());
+
+        bus.write8(REG_IE, 0x01);
+        bus.write8(REG_IF, 0x01);
+        let cycles = cpu.step(&mut bus).expect("nop");
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.pc(), 0x0002);
     }
 
     #[test]
