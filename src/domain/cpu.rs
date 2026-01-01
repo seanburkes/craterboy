@@ -219,6 +219,25 @@ enum Reg16 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cond {
+    Nz,
+    Z,
+    Nc,
+    C,
+}
+
+impl Cond {
+    fn from_bits(bits: u8) -> Self {
+        match bits & 0x03 {
+            0 => Self::Nz,
+            1 => Self::Z,
+            2 => Self::Nc,
+            _ => Self::C,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reg16Stack {
     BC,
     DE,
@@ -535,6 +554,16 @@ impl Cpu {
                 self.pc = self.pc.wrapping_add(offset as u16);
                 Ok(12)
             }
+            0x20 | 0x28 | 0x30 | 0x38 => {
+                let offset = self.fetch8(bus) as i8;
+                let cond = Cond::from_bits(opcode >> 3);
+                if self.test_cond(cond) {
+                    self.pc = self.pc.wrapping_add(offset as u16);
+                    Ok(12)
+                } else {
+                    Ok(8)
+                }
+            }
             0x76 => {
                 self.halted = true;
                 Ok(4)
@@ -553,6 +582,38 @@ impl Cpu {
                 let addr = self.fetch16(bus);
                 self.pc = addr;
                 Ok(16)
+            }
+            0xC0 | 0xC8 | 0xD0 | 0xD8 => {
+                let cond = Cond::from_bits(opcode >> 3);
+                if self.test_cond(cond) {
+                    let addr = self.pop16(bus);
+                    self.pc = addr;
+                    Ok(20)
+                } else {
+                    Ok(8)
+                }
+            }
+            0xC2 | 0xCA | 0xD2 | 0xDA => {
+                let addr = self.fetch16(bus);
+                let cond = Cond::from_bits(opcode >> 3);
+                if self.test_cond(cond) {
+                    self.pc = addr;
+                    Ok(16)
+                } else {
+                    Ok(12)
+                }
+            }
+            0xC4 | 0xCC | 0xD4 | 0xDC => {
+                let addr = self.fetch16(bus);
+                let cond = Cond::from_bits(opcode >> 3);
+                if self.test_cond(cond) {
+                    let ret_addr = self.pc;
+                    self.push16(bus, ret_addr);
+                    self.pc = addr;
+                    Ok(24)
+                } else {
+                    Ok(12)
+                }
             }
             0xC7 | 0xCF | 0xD7 | 0xDF | 0xE7 | 0xEF | 0xF7 | 0xFF => {
                 let addr = match opcode {
@@ -843,6 +904,15 @@ impl Cpu {
         self.regs.set_flag_h(half_carry);
         self.regs.set_flag_c(carry);
         result
+    }
+
+    fn test_cond(&self, cond: Cond) -> bool {
+        match cond {
+            Cond::Nz => !self.regs.flag_z(),
+            Cond::Z => self.regs.flag_z(),
+            Cond::Nc => !self.regs.flag_c(),
+            Cond::C => self.regs.flag_c(),
+        }
     }
 
     fn alu_and(&mut self, value: u8) {
@@ -1356,5 +1426,88 @@ mod tests {
         assert_eq!(cpu.sp(), sp_start.wrapping_sub(2));
         assert_eq!(bus.read8(cpu.sp()), 0x01);
         assert_eq!(bus.read8(cpu.sp().wrapping_add(1)), 0x00);
+    }
+
+    #[test]
+    fn cpu_jr_conditional() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x20;
+        rom[0x0001] = 0x02;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+
+        cpu.regs_mut().set_flag_z(false);
+        let cycles = cpu.step(&mut bus).expect("jr nz");
+        assert_eq!(cycles, 12);
+        assert_eq!(cpu.pc(), 0x0004);
+
+        let mut bus = bus_with_rom(vec![0x28, 0x02]);
+        let mut cpu = Cpu::new();
+        cpu.regs_mut().set_flag_z(false);
+        let cycles = cpu.step(&mut bus).expect("jr z");
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.pc(), 0x0002);
+    }
+
+    #[test]
+    fn cpu_jp_call_ret_conditional() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0xC2;
+        rom[0x0001] = 0x05;
+        rom[0x0002] = 0x00;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        cpu.regs_mut().set_flag_z(true);
+
+        let cycles = cpu.step(&mut bus).expect("jp nz");
+        assert_eq!(cycles, 12);
+        assert_eq!(cpu.pc(), 0x0003);
+
+        let mut bus = bus_with_rom(vec![0xC2, 0x34, 0x12]);
+        let mut cpu = Cpu::new();
+        cpu.regs_mut().set_flag_z(false);
+        let cycles = cpu.step(&mut bus).expect("jp nz");
+        assert_eq!(cycles, 16);
+        assert_eq!(cpu.pc(), 0x1234);
+
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0xCC;
+        rom[0x0001] = 0x05;
+        rom[0x0002] = 0x00;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        cpu.regs_mut().set_flag_z(true);
+        let sp_start = cpu.sp();
+        let cycles = cpu.step(&mut bus).expect("call z");
+        assert_eq!(cycles, 24);
+        assert_eq!(cpu.pc(), 0x0005);
+        assert_eq!(cpu.sp(), sp_start.wrapping_sub(2));
+
+        let mut bus = bus_with_rom(vec![0xCC, 0x05, 0x00]);
+        let mut cpu = Cpu::new();
+        cpu.regs_mut().set_flag_z(false);
+        let cycles = cpu.step(&mut bus).expect("call z");
+        assert_eq!(cycles, 12);
+        assert_eq!(cpu.pc(), 0x0003);
+
+        let mut bus = bus_with_rom(vec![0xD8]);
+        let mut cpu = Cpu::new();
+        cpu.regs_mut().set_flag_c(true);
+        cpu.set_sp(0xFFFC);
+        bus.write8(0xFFFC, 0x34);
+        bus.write8(0xFFFD, 0x12);
+        let cycles = cpu.step(&mut bus).expect("ret c");
+        assert_eq!(cycles, 20);
+        assert_eq!(cpu.pc(), 0x1234);
+        assert_eq!(cpu.sp(), 0xFFFE);
+
+        let mut bus = bus_with_rom(vec![0xD8]);
+        let mut cpu = Cpu::new();
+        cpu.regs_mut().set_flag_c(false);
+        let sp_start = cpu.sp();
+        let cycles = cpu.step(&mut bus).expect("ret c");
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.pc(), 0x0001);
+        assert_eq!(cpu.sp(), sp_start);
     }
 }
