@@ -60,6 +60,7 @@ pub struct Bus {
     mbc: Mbc,
     boot_rom: Option<Vec<u8>>,
     boot_rom_enabled: bool,
+    boot_rom_just_disabled: bool,
     vram: Vec<u8>,
     wram: Vec<u8>,
     oam: Vec<u8>,
@@ -105,6 +106,7 @@ impl Bus {
             mbc,
             boot_rom,
             boot_rom_enabled,
+            boot_rom_just_disabled: false,
             vram: vec![0; VRAM_SIZE],
             wram: vec![0; WRAM_SIZE],
             oam: vec![0; OAM_SIZE],
@@ -141,6 +143,14 @@ impl Bus {
 
     pub fn boot_rom_enabled(&self) -> bool {
         self.boot_rom_enabled
+    }
+
+    /// Returns true if the boot ROM was disabled since the last call to this method.
+    /// Clears the flag after reading.
+    pub fn take_boot_rom_disabled(&mut self) -> bool {
+        let was_disabled = self.boot_rom_just_disabled;
+        self.boot_rom_just_disabled = false;
+        was_disabled
     }
 
     pub fn vram(&self) -> &[u8] {
@@ -196,6 +206,7 @@ impl Bus {
     pub fn write8(&mut self, addr: u16, value: u8) {
         if addr == 0xFF50 && self.boot_rom_enabled && value != 0 {
             self.boot_rom_enabled = false;
+            self.boot_rom_just_disabled = true;
         }
 
         match addr {
@@ -508,6 +519,44 @@ mod tests {
         bus.write8(0xFF50, 0x01);
         assert!(!bus.boot_rom_enabled());
         assert_eq!(bus.read8(0x0000), 0x11);
+    }
+
+    #[test]
+    fn take_boot_rom_disabled_signals_transition() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+
+        let boot_rom = vec![0xAA; BOOT_ROM_SIZE];
+        let mut bus = Bus::with_boot_rom(cartridge, Some(boot_rom)).expect("bus");
+
+        // Initially not signaled
+        assert!(!bus.take_boot_rom_disabled());
+
+        // Disable boot ROM
+        bus.write8(0xFF50, 0x01);
+
+        // First call returns true
+        assert!(bus.take_boot_rom_disabled());
+
+        // Subsequent calls return false (flag cleared)
+        assert!(!bus.take_boot_rom_disabled());
+    }
+
+    #[test]
+    fn take_boot_rom_disabled_not_signaled_without_boot_rom() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // No boot ROM means no transition signal
+        assert!(!bus.take_boot_rom_disabled());
+
+        // Writing to 0xFF50 has no effect
+        bus.write8(0xFF50, 0x01);
+        assert!(!bus.take_boot_rom_disabled());
     }
 
     #[test]

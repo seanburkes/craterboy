@@ -93,6 +93,10 @@ impl Emulator {
                 bus.step(step_cycles);
                 frame_ready = self.ppu.step(step_cycles, bus, &mut self.framebuffer);
                 cycles = cycles.saturating_add(step_cycles);
+
+                if bus.take_boot_rom_disabled() {
+                    self.booted = true;
+                }
             }
             Ok(cycles)
         } else {
