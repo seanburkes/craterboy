@@ -716,6 +716,13 @@ impl Cpu {
                 self.alu_sub(value);
                 Ok(8)
             }
+            0xD9 => {
+                let addr = self.pop16(bus);
+                self.pc = addr;
+                self.ime = true;
+                self.ime_delay = 0;
+                Ok(16)
+            }
             0xDE => {
                 let value = self.fetch8(bus);
                 self.alu_sbc(value);
@@ -757,6 +764,10 @@ impl Cpu {
                 let addr = 0xFF00u16.wrapping_add(self.regs.c as u16);
                 bus.write8(addr, self.regs.a);
                 Ok(8)
+            }
+            0xE9 => {
+                self.pc = self.regs.hl();
+                Ok(4)
             }
             0xFA => {
                 let addr = self.fetch16(bus);
@@ -2039,6 +2050,32 @@ mod tests {
         cpu.step(&mut bus).expect("ld hl,d16");
         cpu.step(&mut bus).expect("ld sp,hl");
         assert_eq!(cpu.sp(), 0x5678);
+    }
+
+    #[test]
+    fn cpu_jp_hl_and_reti() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x21;
+        rom[0x0001] = 0x05;
+        rom[0x0002] = 0x00;
+        rom[0x0003] = 0xE9;
+        rom[0x0004] = 0x00;
+        rom[0x0005] = 0xD9;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        cpu.set_ime(false);
+        cpu.set_sp(0xFFFC);
+        bus.write8(0xFFFC, 0x34);
+        bus.write8(0xFFFD, 0x12);
+
+        cpu.step(&mut bus).expect("ld hl,d16");
+        cpu.step(&mut bus).expect("jp (hl)");
+        assert_eq!(cpu.pc(), 0x0005);
+
+        cpu.step(&mut bus).expect("reti");
+        assert_eq!(cpu.pc(), 0x1234);
+        assert!(cpu.ime());
+        assert_eq!(cpu.sp(), 0xFFFE);
     }
 
     #[test]
