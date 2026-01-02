@@ -5,6 +5,8 @@ const REG_LCDC: u16 = 0xFF40;
 const REG_SCY: u16 = 0xFF42;
 const REG_SCX: u16 = 0xFF43;
 const REG_BGP: u16 = 0xFF47;
+const REG_OBP0: u16 = 0xFF48;
+const REG_OBP1: u16 = 0xFF49;
 const REG_WY: u16 = 0xFF4A;
 const REG_WX: u16 = 0xFF4B;
 const VRAM_SIZE: usize = 0x2000;
@@ -42,9 +44,9 @@ impl Ppu {
             self.clear_frame(framebuffer, DMG_PALETTE[0]);
             return;
         }
-        if lcdc & 0x01 == 0 {
+        let bg_enabled = lcdc & 0x01 != 0;
+        if !bg_enabled {
             self.clear_frame(framebuffer, DMG_PALETTE[0]);
-            return;
         }
 
         let scx = bus.read8(REG_SCX);
@@ -63,52 +65,61 @@ impl Ppu {
         let use_unsigned = lcdc & 0x10 != 0;
         let window_enabled = lcdc & 0x20 != 0;
         let window_active = window_enabled && wy <= 143 && wx <= 166;
+        let sprites_enabled = lcdc & 0x02 != 0;
+        let sprite_height = if lcdc & 0x04 != 0 { 16 } else { 8 };
         let width = FRAME_WIDTH;
         let height = FRAME_HEIGHT;
         let pixels = framebuffer.as_mut_slice();
 
-        for y in 0..height {
-            for x in 0..width {
-                let use_window = window_active && (y as u8) >= wy && (x as i16 + 7) >= wx as i16;
+        if bg_enabled {
+            for y in 0..height {
+                for x in 0..width {
+                    let use_window =
+                        window_active && (y as u8) >= wy && (x as i16 + 7) >= wx as i16;
 
-                let (tile_map_base, tile_x, tile_y, line_x, line_y) = if use_window {
-                    let win_x = (x as i16 + 7 - wx as i16) as usize;
-                    let win_y = (y as i16 - wy as i16) as usize;
-                    let tile_x = win_x / 8;
-                    let tile_y = win_y / 8;
-                    let line_x = win_x % 8;
-                    let line_y = win_y % 8;
-                    (win_tile_map_base, tile_x, tile_y, line_x, line_y)
-                } else {
-                    let map_x = (x as u8).wrapping_add(scx) as usize;
-                    let map_y = (y as u8).wrapping_add(scy) as usize;
-                    let tile_x = map_x / 8;
-                    let tile_y = map_y / 8;
-                    let line_x = map_x % 8;
-                    let line_y = map_y % 8;
-                    (bg_tile_map_base, tile_x, tile_y, line_x, line_y)
-                };
+                    let (tile_map_base, tile_x, tile_y, line_x, line_y) = if use_window {
+                        let win_x = (x as i16 + 7 - wx as i16) as usize;
+                        let win_y = (y as i16 - wy as i16) as usize;
+                        let tile_x = win_x / 8;
+                        let tile_y = win_y / 8;
+                        let line_x = win_x % 8;
+                        let line_y = win_y % 8;
+                        (win_tile_map_base, tile_x, tile_y, line_x, line_y)
+                    } else {
+                        let map_x = (x as u8).wrapping_add(scx) as usize;
+                        let map_y = (y as u8).wrapping_add(scy) as usize;
+                        let tile_x = map_x / 8;
+                        let tile_y = map_y / 8;
+                        let line_x = map_x % 8;
+                        let line_y = map_y % 8;
+                        (bg_tile_map_base, tile_x, tile_y, line_x, line_y)
+                    };
 
-                let map_index = tile_y * 32 + tile_x;
-                let tile_id = vram[tile_map_base + map_index];
-                let tile_offset = if use_unsigned {
-                    (tile_id as usize) * TILE_BYTES
-                } else {
-                    let signed = tile_id as i8 as i16;
-                    (0x1000i16 + signed * 16) as usize
-                };
-                let row = tile_offset + line_y * 2;
-                let lo = vram[row];
-                let hi = vram[row + 1];
-                let bit = 7 - line_x;
-                let color_id = ((hi >> bit) & 0x1) << 1 | ((lo >> bit) & 0x1);
-                let palette_index = (bgp >> (color_id * 2)) & 0x03;
-                let color = DMG_PALETTE[palette_index as usize];
-                let idx = (y * width + x) * 3;
-                pixels[idx] = color[0];
-                pixels[idx + 1] = color[1];
-                pixels[idx + 2] = color[2];
+                    let map_index = tile_y * 32 + tile_x;
+                    let tile_id = vram[tile_map_base + map_index];
+                    let tile_offset = if use_unsigned {
+                        (tile_id as usize) * TILE_BYTES
+                    } else {
+                        let signed = tile_id as i8 as i16;
+                        (0x1000i16 + signed * 16) as usize
+                    };
+                    let row = tile_offset + line_y * 2;
+                    let lo = vram[row];
+                    let hi = vram[row + 1];
+                    let bit = 7 - line_x;
+                    let color_id = ((hi >> bit) & 0x1) << 1 | ((lo >> bit) & 0x1);
+                    let palette_index = (bgp >> (color_id * 2)) & 0x03;
+                    let color = DMG_PALETTE[palette_index as usize];
+                    let idx = (y * width + x) * 3;
+                    pixels[idx] = color[0];
+                    pixels[idx + 1] = color[1];
+                    pixels[idx + 2] = color[2];
+                }
             }
+        }
+
+        if sprites_enabled {
+            self.render_sprites(bus, framebuffer, sprite_height);
         }
     }
 
@@ -118,6 +129,82 @@ impl Ppu {
             pixels[idx] = color[0];
             pixels[idx + 1] = color[1];
             pixels[idx + 2] = color[2];
+        }
+    }
+
+    fn render_sprites(&self, bus: &Bus, framebuffer: &mut Framebuffer, sprite_height: usize) {
+        let obp0 = bus.read8(REG_OBP0);
+        let obp1 = bus.read8(REG_OBP1);
+        let vram = bus.vram();
+        let pixels = framebuffer.as_mut_slice();
+        let width = FRAME_WIDTH;
+        let height = FRAME_HEIGHT;
+
+        for i in 0..40 {
+            let base = 0xFE00u16 + (i * 4) as u16;
+            let y = bus.read8(base) as i16 - 16;
+            let x = bus.read8(base + 1) as i16 - 8;
+            let tile = bus.read8(base + 2);
+            let attr = bus.read8(base + 3);
+
+            if x <= -8 || x >= width as i16 || y <= -(sprite_height as i16) || y >= height as i16
+            {
+                continue;
+            }
+
+            let y_flip = attr & 0x40 != 0;
+            let x_flip = attr & 0x20 != 0;
+            let palette = if attr & 0x10 != 0 { obp1 } else { obp0 };
+            let priority = attr & 0x80 != 0;
+
+            for row in 0..sprite_height {
+                let screen_y = y + row as i16;
+                if screen_y < 0 || screen_y >= height as i16 {
+                    continue;
+                }
+                let mut tile_row = if y_flip {
+                    sprite_height - 1 - row
+                } else {
+                    row
+                };
+                let mut tile_index = tile as usize;
+                if sprite_height == 16 {
+                    tile_index &= 0xFE;
+                    if tile_row >= 8 {
+                        tile_index += 1;
+                        tile_row -= 8;
+                    }
+                }
+                let row_addr = tile_index * TILE_BYTES + tile_row * 2;
+                let lo = vram[row_addr];
+                let hi = vram[row_addr + 1];
+                for col in 0..8 {
+                    let screen_x = x + col as i16;
+                    if screen_x < 0 || screen_x >= width as i16 {
+                        continue;
+                    }
+                    let bit = if x_flip { col } else { 7 - col };
+                    let color_id = ((hi >> bit) & 0x1) << 1 | ((lo >> bit) & 0x1);
+                    if color_id == 0 {
+                        continue;
+                    }
+                    let palette_index = (palette >> (color_id * 2)) & 0x03;
+                    let color = DMG_PALETTE[palette_index as usize];
+                    let idx = (screen_y as usize * width + screen_x as usize) * 3;
+                    if priority {
+                        let bg = &pixels[idx..idx + 3];
+                        if bg[0] != DMG_PALETTE[0][0]
+                            || bg[1] != DMG_PALETTE[0][1]
+                            || bg[2] != DMG_PALETTE[0][2]
+                        {
+                            continue;
+                        }
+                    }
+                    pixels[idx] = color[0];
+                    pixels[idx + 1] = color[1];
+                    pixels[idx + 2] = color[2];
+                }
+            }
         }
     }
 }
@@ -278,5 +365,26 @@ mod tests {
         let idx_win = (row * width + 159) * 3;
         assert_eq!(framebuffer.as_slice()[idx_bg], 0x88);
         assert_eq!(framebuffer.as_slice()[idx_win], 0x34);
+    }
+
+    #[test]
+    fn render_frame_sprites_draw_on_blank_bg() {
+        let rom = vec![0; ROM_BANK_SIZE];
+        let mut bus = bus_with_rom(rom);
+        let mut framebuffer = Framebuffer::new();
+        let ppu = Ppu::new();
+
+        bus.write8(0xFF40, 0x82);
+        bus.write8(0xFF48, 0xE4);
+        bus.write8(0x8000, 0x80);
+        bus.write8(0x8001, 0x00);
+
+        bus.write8(0xFE00, 16);
+        bus.write8(0xFE01, 8);
+        bus.write8(0xFE02, 0x00);
+        bus.write8(0xFE03, 0x00);
+
+        ppu.render_frame(&bus, &mut framebuffer);
+        assert_eq!(framebuffer.as_slice()[0], 0x88);
     }
 }
