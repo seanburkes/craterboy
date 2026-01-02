@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -54,6 +55,7 @@ async fn run_async(rom_path: Option<PathBuf>) {
     let mut next_frame = Instant::now();
     let mut fps_last = Instant::now();
     let mut fps_frames: u32 = 0;
+    state.set_overlay_metric("FPS", "0.0");
 
     let _ = event_loop.run(move |event, elwt| match event {
         Event::WindowEvent { event, window_id } if window_id == target_window_id => match event {
@@ -62,7 +64,7 @@ async fn run_async(rom_path: Option<PathBuf>) {
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     let pressed = event.state == ElementState::Pressed;
-                    state.handle_key(code, pressed);
+                    state.handle_key(code, pressed, event.repeat);
                     window.request_redraw();
                 }
             }
@@ -80,7 +82,7 @@ async fn run_async(rom_path: Option<PathBuf>) {
                 let elapsed = now.duration_since(fps_last);
                 if elapsed >= Duration::from_secs(1) {
                     let fps = fps_frames as f64 / elapsed.as_secs_f64();
-                    println!("FPS: {:.1}", fps);
+                    state.set_overlay_metric("FPS", format!("{:.1}", fps));
                     fps_frames = 0;
                     fps_last = now;
                 }
@@ -160,6 +162,7 @@ struct State {
     rom_bytes: Option<Vec<u8>>,
     rom_frame_ready: bool,
     input: InputState,
+    overlay: Overlay,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -391,6 +394,7 @@ impl State {
             rom_bytes,
             rom_frame_ready: false,
             input: InputState::default(),
+            overlay: Overlay::new(),
         }
     }
 
@@ -435,9 +439,16 @@ impl State {
         }
     }
 
-    fn handle_key(&mut self, code: KeyCode, pressed: bool) {
+    fn handle_key(&mut self, code: KeyCode, pressed: bool, repeated: bool) {
+        if pressed && !repeated && code == KeyCode::F1 {
+            self.overlay.toggle();
+        }
         self.input.handle_key(code, pressed);
         self.input.apply(&mut self.emulator);
+    }
+
+    fn set_overlay_metric(&mut self, label: &str, value: impl Into<String>) {
+        self.overlay.set_metric(label, value);
     }
 
     fn render_rom_tiles(framebuffer: &mut [u8], rom: &[u8]) {
@@ -486,8 +497,10 @@ impl State {
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let (padded, bytes_per_row) =
+        let (mut padded, bytes_per_row) =
             prepare_framebuffer_upload(self.emulator.framebuffer().as_slice());
+        self.overlay
+            .draw(&mut padded, bytes_per_row, FRAME_WIDTH, FRAME_HEIGHT);
 
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
@@ -573,4 +586,215 @@ fn prepare_framebuffer_upload(frame: &[u8]) -> (Vec<u8>, u32) {
         }
     }
     (data, padded as u32)
+}
+
+#[derive(Debug)]
+struct Overlay {
+    entries: Vec<OverlayEntry>,
+    enabled: bool,
+    font: FontArc,
+    scale: PxScale,
+}
+
+#[derive(Debug)]
+struct OverlayEntry {
+    label: String,
+    text: String,
+}
+
+impl Overlay {
+    fn new() -> Self {
+        let font = FontArc::try_from_slice(include_bytes!(
+            "../../assets/fonts/RobotoMono[wght].ttf"
+        ))
+            .expect("overlay font");
+        Self {
+            entries: Vec::new(),
+            enabled: true,
+            font,
+            scale: PxScale::from(12.0),
+        }
+    }
+
+    fn set_metric(&mut self, label: &str, value: impl Into<String>) {
+        let value = value.into();
+        let text = format!("{label}: {value}");
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.label == label) {
+            entry.text = text;
+            return;
+        }
+        self.entries.push(OverlayEntry {
+            label: label.to_string(),
+            text,
+        });
+    }
+
+    fn toggle(&mut self) {
+        self.enabled = !self.enabled;
+    }
+
+    fn draw(&self, rgba: &mut [u8], bytes_per_row: u32, width: usize, height: usize) {
+        if !self.enabled || self.entries.is_empty() {
+            return;
+        }
+        let stride = bytes_per_row as usize / 4;
+        if stride == 0 || rgba.len() < bytes_per_row as usize * height {
+            return;
+        }
+
+        let scaled = self.font.as_scaled(self.scale);
+        let line_gap = scaled.line_gap().ceil().max(1.0) as usize;
+        let line_height = scaled.height().ceil() as usize + line_gap;
+        let text_padding = 4;
+        let margin = 6;
+
+        let mut max_width: f32 = 0.0;
+        for entry in &self.entries {
+            max_width = max_width.max(text_width(&self.font, self.scale, &entry.text));
+        }
+        let text_height = self
+            .entries
+            .len()
+            .saturating_mul(line_height)
+            .saturating_sub(line_gap);
+        let box_width = max_width.ceil() as usize + text_padding * 2;
+        let box_height = text_height.saturating_add(text_padding * 2);
+
+        let box_x = width.saturating_sub(box_width + margin);
+        let box_y = margin;
+
+        draw_rect_blend(
+            rgba,
+            stride,
+            width,
+            height,
+            box_x,
+            box_y,
+            box_width,
+            box_height,
+            [0x10, 0x10, 0x14],
+            180,
+        );
+
+        let mut y = box_y + text_padding;
+        for entry in &self.entries {
+            let line_width = text_width(&self.font, self.scale, &entry.text).ceil() as usize;
+            let x = box_x + text_padding + (max_width.ceil() as usize).saturating_sub(line_width);
+            draw_text(
+                rgba,
+                stride,
+                width,
+                height,
+                x,
+                y,
+                &entry.text,
+                [0xF2, 0xF2, 0xF2],
+                &self.font,
+                self.scale,
+            );
+            y = y.saturating_add(line_height);
+        }
+    }
+}
+
+fn text_width(font: &FontArc, scale: PxScale, text: &str) -> f32 {
+    let scaled = font.as_scaled(scale);
+    let mut width = 0.0;
+    let mut prev = None;
+    for ch in text.chars() {
+        let id = scaled.glyph_id(ch);
+        if let Some(prev_id) = prev {
+            width += scaled.kern(prev_id, id);
+        }
+        width += scaled.h_advance(id);
+        prev = Some(id);
+    }
+    width
+}
+
+fn draw_text(
+    rgba: &mut [u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    text: &str,
+    color: [u8; 3],
+    font: &FontArc,
+    scale: PxScale,
+) {
+    let scaled = font.as_scaled(scale);
+    let mut caret = point(x as f32, y as f32 + scaled.ascent());
+    let mut prev = None;
+    for ch in text.chars() {
+        let id = scaled.glyph_id(ch);
+        if let Some(prev_id) = prev {
+            caret.x += scaled.kern(prev_id, id);
+        }
+        let glyph = id.with_scale_and_position(scale, caret);
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|gx, gy, v| {
+                let px = bounds.min.x as i32 + gx as i32;
+                let py = bounds.min.y as i32 + gy as i32;
+                if px < 0 || py < 0 {
+                    return;
+                }
+                let px = px as usize;
+                let py = py as usize;
+                if px >= width || py >= height {
+                    return;
+                }
+                let idx = (py * stride + px) * 4;
+                if idx + 3 >= rgba.len() {
+                    return;
+                }
+                let alpha = (v * 255.0).round() as u8;
+                blend_pixel(rgba, idx, color, alpha);
+            });
+        }
+        caret.x += scaled.h_advance(id);
+        prev = Some(id);
+    }
+}
+
+fn draw_rect_blend(
+    rgba: &mut [u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    color: [u8; 3],
+    alpha: u8,
+) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let x_end = (x + w).min(width);
+    let y_end = (y + h).min(height);
+    for py in y..y_end {
+        for px in x..x_end {
+            let idx = (py * stride + px) * 4;
+            if idx + 3 >= rgba.len() {
+                continue;
+            }
+            blend_pixel(rgba, idx, color, alpha);
+        }
+    }
+}
+
+fn blend_pixel(rgba: &mut [u8], idx: usize, color: [u8; 3], alpha: u8) {
+    if alpha == 0 {
+        return;
+    }
+    let inv = 255u16.saturating_sub(alpha as u16);
+    let alpha = alpha as u16;
+    rgba[idx] = ((rgba[idx] as u16 * inv + color[0] as u16 * alpha) / 255) as u8;
+    rgba[idx + 1] = ((rgba[idx + 1] as u16 * inv + color[1] as u16 * alpha) / 255) as u8;
+    rgba[idx + 2] = ((rgba[idx + 2] as u16 * inv + color[2] as u16 * alpha) / 255) as u8;
+    rgba[idx + 3] = 0xFF;
 }

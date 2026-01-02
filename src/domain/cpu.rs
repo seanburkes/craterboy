@@ -2133,10 +2133,26 @@ mod tests {
             cpu.daa();
 
             assert_eq!(cpu.regs().a(), expected_a, "case {idx}");
-            assert_eq!(cpu.regs().flag_z(), expected_flags & 0x08 != 0, "case {idx}");
-            assert_eq!(cpu.regs().flag_n(), expected_flags & 0x04 != 0, "case {idx}");
-            assert_eq!(cpu.regs().flag_h(), expected_flags & 0x02 != 0, "case {idx}");
-            assert_eq!(cpu.regs().flag_c(), expected_flags & 0x01 != 0, "case {idx}");
+            assert_eq!(
+                cpu.regs().flag_z(),
+                expected_flags & 0x08 != 0,
+                "case {idx}"
+            );
+            assert_eq!(
+                cpu.regs().flag_n(),
+                expected_flags & 0x04 != 0,
+                "case {idx}"
+            );
+            assert_eq!(
+                cpu.regs().flag_h(),
+                expected_flags & 0x02 != 0,
+                "case {idx}"
+            );
+            assert_eq!(
+                cpu.regs().flag_c(),
+                expected_flags & 0x01 != 0,
+                "case {idx}"
+            );
         }
     }
 
