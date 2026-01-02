@@ -1983,6 +1983,128 @@ mod tests {
     }
 
     #[test]
+    fn cpu_daa_vectors() {
+        struct Case {
+            a: u8,
+            n: bool,
+            h: bool,
+            c: bool,
+            expected_a: u8,
+            expected_z: bool,
+            expected_c: bool,
+        }
+
+        let cases = [
+            Case {
+                a: 0x00,
+                n: false,
+                h: false,
+                c: false,
+                expected_a: 0x00,
+                expected_z: true,
+                expected_c: false,
+            },
+            Case {
+                a: 0x1A,
+                n: false,
+                h: false,
+                c: false,
+                expected_a: 0x20,
+                expected_z: false,
+                expected_c: false,
+            },
+            Case {
+                a: 0x81,
+                n: false,
+                h: true,
+                c: false,
+                expected_a: 0x87,
+                expected_z: false,
+                expected_c: false,
+            },
+            Case {
+                a: 0x10,
+                n: false,
+                h: true,
+                c: true,
+                expected_a: 0x76,
+                expected_z: false,
+                expected_c: true,
+            },
+            Case {
+                a: 0x9A,
+                n: false,
+                h: false,
+                c: false,
+                expected_a: 0x00,
+                expected_z: true,
+                expected_c: true,
+            },
+            Case {
+                a: 0xAD,
+                n: false,
+                h: false,
+                c: false,
+                expected_a: 0x13,
+                expected_z: false,
+                expected_c: true,
+            },
+            Case {
+                a: 0x33,
+                n: true,
+                h: false,
+                c: false,
+                expected_a: 0x33,
+                expected_z: false,
+                expected_c: false,
+            },
+            Case {
+                a: 0x0F,
+                n: true,
+                h: true,
+                c: false,
+                expected_a: 0x09,
+                expected_z: false,
+                expected_c: false,
+            },
+            Case {
+                a: 0xFF,
+                n: true,
+                h: true,
+                c: true,
+                expected_a: 0x99,
+                expected_z: false,
+                expected_c: true,
+            },
+            Case {
+                a: 0xF0,
+                n: true,
+                h: false,
+                c: true,
+                expected_a: 0x90,
+                expected_z: false,
+                expected_c: true,
+            },
+        ];
+
+        for (idx, case) in cases.iter().enumerate() {
+            let mut cpu = Cpu::new();
+            cpu.regs_mut().set_a(case.a);
+            cpu.regs_mut().set_flag_n(case.n);
+            cpu.regs_mut().set_flag_h(case.h);
+            cpu.regs_mut().set_flag_c(case.c);
+
+            cpu.daa();
+
+            assert_eq!(cpu.regs().a(), case.expected_a, "case {idx}");
+            assert_eq!(cpu.regs().flag_z(), case.expected_z, "case {idx}");
+            assert_eq!(cpu.regs().flag_n(), case.n, "case {idx}");
+            assert!(!cpu.regs().flag_h(), "case {idx}");
+            assert_eq!(cpu.regs().flag_c(), case.expected_c, "case {idx}");
+        }
+    }
+
+    #[test]
     fn cpu_misc_flags_ops() {
         let mut rom = vec![0; ROM_BANK_SIZE];
         rom[0x0000] = 0x3E;
