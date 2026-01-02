@@ -37,6 +37,10 @@ async fn run_async(rom_path: Option<PathBuf>) {
         WindowBuilder::new()
             .with_title("craterboy")
             .with_inner_size(PhysicalSize::new(640, 576))
+            .with_min_inner_size(PhysicalSize::new(
+                FRAME_WIDTH_U32,
+                FRAME_HEIGHT_U32,
+            ))
             .build(&event_loop)
             .expect("window"),
     );
@@ -506,11 +510,11 @@ impl State {
             return Viewport::full(window_w, window_h);
         }
 
-        let scale_w = window_w as f32 / FRAME_WIDTH as f32;
-        let scale_h = window_h as f32 / FRAME_HEIGHT as f32;
-        let scale = scale_w.min(scale_h);
-        let target_w = ((FRAME_WIDTH as f32) * scale).floor().max(1.0) as u32;
-        let target_h = ((FRAME_HEIGHT as f32) * scale).floor().max(1.0) as u32;
+        let max_scale_w = window_w / FRAME_WIDTH_U32;
+        let max_scale_h = window_h / FRAME_HEIGHT_U32;
+        let scale = max_scale_w.min(max_scale_h).max(1);
+        let target_w = FRAME_WIDTH_U32 * scale;
+        let target_h = FRAME_HEIGHT_U32 * scale;
         let x = window_w.saturating_sub(target_w) / 2;
         let y = window_h.saturating_sub(target_h) / 2;
 
