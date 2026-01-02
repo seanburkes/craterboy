@@ -1858,6 +1858,42 @@ mod tests {
     }
 
     #[test]
+    fn cpu_cb_cycles_for_hl_vs_reg() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x06;
+        rom[0x0001] = 0x01;
+        rom[0x0002] = 0x21;
+        rom[0x0003] = 0x00;
+        rom[0x0004] = 0xC0;
+        rom[0x0005] = 0x36;
+        rom[0x0006] = 0x01;
+        rom[0x0007] = 0xCB;
+        rom[0x0008] = 0x00;
+        rom[0x0009] = 0xCB;
+        rom[0x000A] = 0x06;
+        rom[0x000B] = 0xCB;
+        rom[0x000C] = 0x40;
+        rom[0x000D] = 0xCB;
+        rom[0x000E] = 0x46;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+
+        cpu.step(&mut bus).expect("ld b,d8");
+        cpu.step(&mut bus).expect("ld hl,d16");
+        cpu.step(&mut bus).expect("ld (hl),d8");
+
+        let cycles = cpu.step(&mut bus).expect("cb rlc b");
+        assert_eq!(cycles, 8);
+        let cycles = cpu.step(&mut bus).expect("cb rlc (hl)");
+        assert_eq!(cycles, 16);
+
+        let cycles = cpu.step(&mut bus).expect("cb bit 0,b");
+        assert_eq!(cycles, 8);
+        let cycles = cpu.step(&mut bus).expect("cb bit 0,(hl)");
+        assert_eq!(cycles, 12);
+    }
+
+    #[test]
     fn cpu_jr_conditional() {
         let mut rom = vec![0; ROM_BANK_SIZE];
         rom[0x0000] = 0x20;
