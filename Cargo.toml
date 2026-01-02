@@ -10,3 +10,8 @@ pollster = "0.3"
 wgpu = "0.19"
 winit = "0.29"
 ab_glyph = "0.2"
+gilrs = { version = "0.10", optional = true }
+
+[features]
+default = ["gamepad"]
+gamepad = ["gilrs"]

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
+
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -14,6 +15,9 @@ use crate::domain::{
     Cartridge, Emulator, FRAME_HEIGHT, FRAME_INTERVAL_NS, FRAME_SIZE, FRAME_WIDTH,
 };
 use crate::infrastructure::rom_loader::RomLoadError;
+
+#[cfg(feature = "gamepad")]
+use gilrs::{Axis, Button, Gamepad, GamepadId, Gilrs};
 
 const FRAME_WIDTH_U32: u32 = FRAME_WIDTH as u32;
 const FRAME_HEIGHT_U32: u32 = FRAME_HEIGHT as u32;
@@ -195,6 +199,8 @@ struct State {
     rom_frame_ready: bool,
     input: InputState,
     overlay: Overlay,
+    #[cfg(feature = "gamepad")]
+    gilrs: Option<Gilrs>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -255,6 +261,33 @@ impl InputState {
 
         emulator.set_joyp_dpad(dpad);
         emulator.set_joyp_buttons(buttons);
+    }
+
+    #[cfg(feature = "gamepad")]
+    fn handle_gamepad(&mut self, gamepad: &Gamepad, deadzone: f32) {
+        // Standard Xbox/PS controller mapping
+        // D-pad: Left stick
+        let axis_x = gamepad
+            .axis_data(gilrs::Axis::LeftStickX)
+            .map(|a| a.value())
+            .unwrap_or(0.0);
+        let axis_y = gamepad
+            .axis_data(gilrs::Axis::LeftStickY)
+            .map(|a| a.value())
+            .unwrap_or(0.0);
+
+        self.left = axis_x < -deadzone;
+        self.right = axis_x > deadzone;
+        self.up = axis_y < -deadzone;
+        self.down = axis_y > deadzone;
+
+        // A/B face buttons
+        self.a = gamepad.is_pressed(gilrs::Button::South) || gamepad.is_pressed(gilrs::Button::East);
+        self.b = gamepad.is_pressed(gilrs::Button::West) || gamepad.is_pressed(gilrs::Button::North);
+
+        // Start/Select
+        self.start = gamepad.is_pressed(gilrs::Button::Start) || gamepad.is_pressed(gilrs::Button::Mode);
+        self.select = gamepad.is_pressed(gilrs::Button::Select) || gamepad.is_pressed(gilrs::Button::LeftTrigger);
     }
 }
 
@@ -411,6 +444,9 @@ impl State {
             }
         }
 
+        #[cfg(feature = "gamepad")]
+        let gilrs = Gilrs::new().ok();
+
         Self {
             surface,
             device,
@@ -428,6 +464,8 @@ impl State {
             rom_frame_ready: false,
             input: InputState::default(),
             overlay: Overlay::new(),
+            #[cfg(feature = "gamepad")]
+            gilrs,
         }
     }
 
@@ -442,6 +480,14 @@ impl State {
     }
 
     fn update_frame(&mut self) {
+        // Poll gamepad input
+        #[cfg(feature = "gamepad")]
+        if let Some(ref gilrs) = self.gilrs {
+            if let Some((id, gamepad)) = gilrs.gamepads().next() {
+                self.input.handle_gamepad(&gamepad, 0.15);
+            }
+        }
+
         self.input.apply(&mut self.emulator);
         let _ = self.emulator.step_frame();
         if self.emulator.has_bus() {
@@ -721,9 +767,9 @@ impl Overlay {
                 .expect("overlay font");
         Self {
             entries: Vec::new(),
-            enabled: true,
+            enabled: false,
             font,
-            scale: PxScale::from(12.0),
+            scale: PxScale::from(24.0),
         }
     }
 
