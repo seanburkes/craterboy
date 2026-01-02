@@ -21,11 +21,15 @@ const DMG_PALETTE: [[u8; 3]; 4] = [
 #[derive(Debug)]
 pub struct Ppu {
     cycle_counter: u32,
+    bg_priority: Vec<u8>,
 }
 
 impl Ppu {
     pub fn new() -> Self {
-        Self { cycle_counter: 0 }
+        Self {
+            cycle_counter: 0,
+            bg_priority: vec![0; FRAME_WIDTH * FRAME_HEIGHT],
+        }
     }
 
     pub fn step(&mut self, cycles: u32, bus: &Bus, framebuffer: &mut Framebuffer) -> bool {
@@ -38,7 +42,7 @@ impl Ppu {
         true
     }
 
-    pub fn render_frame(&self, bus: &Bus, framebuffer: &mut Framebuffer) {
+    pub fn render_frame(&mut self, bus: &Bus, framebuffer: &mut Framebuffer) {
         let lcdc = bus.read8(REG_LCDC);
         if lcdc & 0x80 == 0 {
             self.clear_frame(framebuffer, DMG_PALETTE[0]);
@@ -47,6 +51,7 @@ impl Ppu {
         let bg_enabled = lcdc & 0x01 != 0;
         if !bg_enabled {
             self.clear_frame(framebuffer, DMG_PALETTE[0]);
+            self.clear_bg_priority();
         }
 
         let scx = bus.read8(REG_SCX);
@@ -114,6 +119,7 @@ impl Ppu {
                     pixels[idx] = color[0];
                     pixels[idx + 1] = color[1];
                     pixels[idx + 2] = color[2];
+                    self.bg_priority[y * width + x] = color_id;
                 }
             }
         }
@@ -132,6 +138,10 @@ impl Ppu {
         }
     }
 
+    fn clear_bg_priority(&mut self) {
+        self.bg_priority.fill(0);
+    }
+
     fn render_sprites(&self, bus: &Bus, framebuffer: &mut Framebuffer, sprite_height: usize) {
         let obp0 = bus.read8(REG_OBP0);
         let obp1 = bus.read8(REG_OBP1);
@@ -140,15 +150,14 @@ impl Ppu {
         let width = FRAME_WIDTH;
         let height = FRAME_HEIGHT;
 
-        for i in 0..40 {
+        for i in (0..40).rev() {
             let base = 0xFE00u16 + (i * 4) as u16;
             let y = bus.read8(base) as i16 - 16;
             let x = bus.read8(base + 1) as i16 - 8;
             let tile = bus.read8(base + 2);
             let attr = bus.read8(base + 3);
 
-            if x <= -8 || x >= width as i16 || y <= -(sprite_height as i16) || y >= height as i16
-            {
+            if x <= -8 || x >= width as i16 || y <= -(sprite_height as i16) || y >= height as i16 {
                 continue;
             }
 
@@ -162,11 +171,7 @@ impl Ppu {
                 if screen_y < 0 || screen_y >= height as i16 {
                     continue;
                 }
-                let mut tile_row = if y_flip {
-                    sprite_height - 1 - row
-                } else {
-                    row
-                };
+                let mut tile_row = if y_flip { sprite_height - 1 - row } else { row };
                 let mut tile_index = tile as usize;
                 if sprite_height == 16 {
                     tile_index &= 0xFE;
@@ -192,11 +197,7 @@ impl Ppu {
                     let color = DMG_PALETTE[palette_index as usize];
                     let idx = (screen_y as usize * width + screen_x as usize) * 3;
                     if priority {
-                        let bg = &pixels[idx..idx + 3];
-                        if bg[0] != DMG_PALETTE[0][0]
-                            || bg[1] != DMG_PALETTE[0][1]
-                            || bg[2] != DMG_PALETTE[0][2]
-                        {
+                        if self.bg_priority[screen_y as usize * width + screen_x as usize] != 0 {
                             continue;
                         }
                     }
@@ -229,7 +230,7 @@ mod tests {
         let rom = vec![0; ROM_BANK_SIZE];
         let mut bus = bus_with_rom(rom);
         let mut framebuffer = Framebuffer::new();
-        let ppu = Ppu::new();
+        let mut ppu = Ppu::new();
 
         bus.write8(0xFF40, 0x91);
         bus.write8(0xFF47, 0xE4);
@@ -246,7 +247,7 @@ mod tests {
         let rom = vec![0; ROM_BANK_SIZE];
         let mut bus = bus_with_rom(rom);
         let mut framebuffer = Framebuffer::new();
-        let ppu = Ppu::new();
+        let mut ppu = Ppu::new();
 
         bus.write8(0xFF40, 0xF1);
         bus.write8(0xFF47, 0xE4);
@@ -270,7 +271,7 @@ mod tests {
         let rom = vec![0; ROM_BANK_SIZE];
         let mut bus = bus_with_rom(rom);
         let mut framebuffer = Framebuffer::new();
-        let ppu = Ppu::new();
+        let mut ppu = Ppu::new();
 
         bus.write8(0xFF40, 0xF1);
         bus.write8(0xFF47, 0xE4);
@@ -294,7 +295,7 @@ mod tests {
         let rom = vec![0; ROM_BANK_SIZE];
         let mut bus = bus_with_rom(rom);
         let mut framebuffer = Framebuffer::new();
-        let ppu = Ppu::new();
+        let mut ppu = Ppu::new();
 
         bus.write8(0xFF40, 0xF1);
         bus.write8(0xFF47, 0xE4);
@@ -318,7 +319,7 @@ mod tests {
         let rom = vec![0; ROM_BANK_SIZE];
         let mut bus = bus_with_rom(rom);
         let mut framebuffer = Framebuffer::new();
-        let ppu = Ppu::new();
+        let mut ppu = Ppu::new();
 
         bus.write8(0xFF40, 0xF1);
         bus.write8(0xFF47, 0xE4);
@@ -342,7 +343,7 @@ mod tests {
         let rom = vec![0; ROM_BANK_SIZE];
         let mut bus = bus_with_rom(rom);
         let mut framebuffer = Framebuffer::new();
-        let ppu = Ppu::new();
+        let mut ppu = Ppu::new();
 
         bus.write8(0xFF40, 0xF1);
         bus.write8(0xFF47, 0xE4);
@@ -372,7 +373,7 @@ mod tests {
         let rom = vec![0; ROM_BANK_SIZE];
         let mut bus = bus_with_rom(rom);
         let mut framebuffer = Framebuffer::new();
-        let ppu = Ppu::new();
+        let mut ppu = Ppu::new();
 
         bus.write8(0xFF40, 0x82);
         bus.write8(0xFF48, 0xE4);
@@ -383,6 +384,70 @@ mod tests {
         bus.write8(0xFE01, 8);
         bus.write8(0xFE02, 0x00);
         bus.write8(0xFE03, 0x00);
+
+        ppu.render_frame(&bus, &mut framebuffer);
+        assert_eq!(framebuffer.as_slice()[0], 0x88);
+    }
+
+    #[test]
+    fn render_frame_sprite_priority_with_window() {
+        let rom = vec![0; ROM_BANK_SIZE];
+        let mut bus = bus_with_rom(rom);
+        let mut framebuffer = Framebuffer::new();
+        let mut ppu = Ppu::new();
+
+        bus.write8(0xFF40, 0xF3);
+        bus.write8(0xFF47, 0xE4);
+        bus.write8(0xFF48, 0xE4);
+        bus.write8(0xFF4A, 0x00);
+        bus.write8(0xFF4B, 0x07);
+
+        bus.write8(0x8000, 0x80);
+        bus.write8(0x8001, 0x00);
+        bus.write8(0x8010, 0x80);
+        bus.write8(0x8011, 0x00);
+        bus.write8(0x8020, 0x80);
+        bus.write8(0x8021, 0x80);
+
+        bus.write8(0x9C00, 0x01);
+
+        bus.write8(0xFE00, 16);
+        bus.write8(0xFE01, 8);
+        bus.write8(0xFE02, 0x02);
+        bus.write8(0xFE03, 0x80);
+
+        ppu.render_frame(&bus, &mut framebuffer);
+        assert_eq!(framebuffer.as_slice()[0], 0x88);
+
+        bus.write8(0xFE03, 0x00);
+        ppu.render_frame(&bus, &mut framebuffer);
+        assert_eq!(framebuffer.as_slice()[0], 0x08);
+    }
+
+    #[test]
+    fn render_frame_sprite_oam_priority() {
+        let rom = vec![0; ROM_BANK_SIZE];
+        let mut bus = bus_with_rom(rom);
+        let mut framebuffer = Framebuffer::new();
+        let mut ppu = Ppu::new();
+
+        bus.write8(0xFF40, 0x83);
+        bus.write8(0xFF48, 0xE4);
+
+        bus.write8(0x8000, 0x80);
+        bus.write8(0x8001, 0x00);
+        bus.write8(0x8010, 0x80);
+        bus.write8(0x8011, 0x80);
+
+        bus.write8(0xFE00, 16);
+        bus.write8(0xFE01, 8);
+        bus.write8(0xFE02, 0x00);
+        bus.write8(0xFE03, 0x00);
+
+        bus.write8(0xFE04, 16);
+        bus.write8(0xFE05, 8);
+        bus.write8(0xFE06, 0x01);
+        bus.write8(0xFE07, 0x00);
 
         ppu.render_frame(&bus, &mut framebuffer);
         assert_eq!(framebuffer.as_slice()[0], 0x88);
