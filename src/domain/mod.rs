@@ -13,7 +13,7 @@ pub use cpu::{Cpu, CpuError, Registers};
 pub use emulator::Emulator;
 pub use framebuffer::{FRAME_CHANNELS, FRAME_HEIGHT, FRAME_SIZE, FRAME_WIDTH, Framebuffer};
 pub use mbc::{Mbc, MbcError, RtcMode};
-pub use ppu::Ppu;
+pub use ppu::{FRAME_INTERVAL_NS, Ppu};
 pub use rom::{
     CartridgeType, CgbFlag, Destination, Licensee, RamSize, RomHeader, RomHeaderError, RomSize,
     SgbFlag, compute_global_checksum, compute_header_checksum, nintendo_logo_matches,

@@ -1,6 +1,9 @@
 use super::{Bus, FRAME_HEIGHT, FRAME_WIDTH, Framebuffer};
 
 const FRAME_CYCLES: u32 = 70224;
+const CYCLES_PER_SECOND: u32 = 4_194_304;
+pub const FRAME_RATE_HZ: u32 = CYCLES_PER_SECOND / FRAME_CYCLES;
+pub const FRAME_INTERVAL_NS: u64 = 1_000_000_000 / FRAME_RATE_HZ as u64;
 const REG_LCDC: u16 = 0xFF40;
 const REG_SCY: u16 = 0xFF42;
 const REG_SCX: u16 = 0xFF43;

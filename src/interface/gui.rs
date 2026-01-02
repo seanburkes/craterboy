@@ -10,7 +10,9 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, WindowBuilder};
 
 use crate::application::app;
-use crate::domain::{Cartridge, Emulator, FRAME_HEIGHT, FRAME_SIZE, FRAME_WIDTH};
+use crate::domain::{
+    Cartridge, Emulator, FRAME_HEIGHT, FRAME_INTERVAL_NS, FRAME_SIZE, FRAME_WIDTH,
+};
 use crate::infrastructure::rom_loader::RomLoadError;
 
 const FRAME_WIDTH_U32: u32 = FRAME_WIDTH as u32;
@@ -53,11 +55,15 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
         .create_surface(Arc::clone(&window))
         .expect("surface");
     let mut state = State::new(instance, surface, size, cartridge, rom_bytes, boot_rom).await;
-    let frame_interval = Duration::from_nanos(1_000_000_000 / 60);
+    let frame_interval = Duration::from_nanos(FRAME_INTERVAL_NS);
+    let target_ms = frame_interval.as_secs_f64() * 1000.0;
     let mut next_frame = Instant::now();
     let mut fps_last = Instant::now();
     let mut fps_frames: u32 = 0;
+    let mut frame_time_last = Instant::now();
     state.set_overlay_metric("FPS", "0.0");
+    state.set_overlay_metric("Frame", "0.0 ms");
+    state.set_overlay_metric("Target", &format!("{:.3} ms", target_ms));
 
     let _ = event_loop.run(move |event, elwt| match event {
         Event::WindowEvent { event, window_id } if window_id == target_window_id => match event {
@@ -83,7 +89,15 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
                     Err(wgpu::SurfaceError::Timeout) => {}
                 }
                 fps_frames = fps_frames.saturating_add(1);
+
                 let now = Instant::now();
+                let frame_time = now.duration_since(frame_time_last);
+                frame_time_last = now;
+                state.set_overlay_metric(
+                    "Frame",
+                    format!("{:.2} ms", frame_time.as_secs_f64() * 1000.0),
+                );
+
                 let elapsed = now.duration_since(fps_last);
                 if elapsed >= Duration::from_secs(1) {
                     let fps = fps_frames as f64 / elapsed.as_secs_f64();
