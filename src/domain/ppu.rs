@@ -69,8 +69,7 @@ impl Ppu {
 
         for y in 0..height {
             for x in 0..width {
-                let use_window =
-                    window_active && (y as u8) >= wy && (x as i16 + 7) >= wx as i16;
+                let use_window = window_active && (y as u8) >= wy && (x as i16 + 7) >= wx as i16;
 
                 let (tile_map_base, tile_x, tile_y, line_x, line_y) = if use_window {
                     let win_x = (x as i16 + 7 - wx as i16) as usize;
@@ -225,5 +224,59 @@ mod tests {
 
         ppu.render_frame(&bus, &mut framebuffer);
         assert_eq!(framebuffer.as_slice()[0], 0x88);
+    }
+
+    #[test]
+    fn render_frame_window_offscreen_left_still_draws() {
+        let rom = vec![0; ROM_BANK_SIZE];
+        let mut bus = bus_with_rom(rom);
+        let mut framebuffer = Framebuffer::new();
+        let ppu = Ppu::new();
+
+        bus.write8(0xFF40, 0xF1);
+        bus.write8(0xFF47, 0xE4);
+        bus.write8(0xFF4A, 0x00);
+        bus.write8(0xFF4B, 0x00);
+
+        bus.write8(0x8000, 0xFF);
+        bus.write8(0x8001, 0x00);
+        bus.write8(0x8010, 0x00);
+        bus.write8(0x8011, 0xFF);
+
+        bus.write8(0x9800, 0x00);
+        bus.write8(0x9C00, 0x01);
+
+        ppu.render_frame(&bus, &mut framebuffer);
+        assert_eq!(framebuffer.as_slice()[0], 0x34);
+    }
+
+    #[test]
+    fn render_frame_window_offscreen_right_clips() {
+        let rom = vec![0; ROM_BANK_SIZE];
+        let mut bus = bus_with_rom(rom);
+        let mut framebuffer = Framebuffer::new();
+        let ppu = Ppu::new();
+
+        bus.write8(0xFF40, 0xF1);
+        bus.write8(0xFF47, 0xE4);
+        bus.write8(0xFF4A, 0x00);
+        bus.write8(0xFF4B, 166);
+
+        bus.write8(0x8000, 0xFF);
+        bus.write8(0x8001, 0x00);
+        bus.write8(0x8010, 0x00);
+        bus.write8(0x8011, 0xFF);
+
+        bus.write8(0x9800, 0x00);
+        bus.write8(0x9C00, 0x01);
+
+        ppu.render_frame(&bus, &mut framebuffer);
+
+        let width = 160;
+        let row = 0;
+        let idx_bg = (row * width + 158) * 3;
+        let idx_win = (row * width + 159) * 3;
+        assert_eq!(framebuffer.as_slice()[idx_bg], 0x88);
+        assert_eq!(framebuffer.as_slice()[idx_win], 0x34);
     }
 }
