@@ -7,7 +7,7 @@ use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::WindowBuilder;
+use winit::window::{Fullscreen, WindowBuilder};
 
 use crate::application::app;
 use crate::domain::{Cartridge, Emulator, FRAME_HEIGHT, FRAME_SIZE, FRAME_WIDTH};
@@ -64,6 +64,9 @@ async fn run_async(rom_path: Option<PathBuf>) {
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     let pressed = event.state == ElementState::Pressed;
+                    if pressed && !event.repeat && code == KeyCode::F11 {
+                        toggle_borderless_fullscreen(&window);
+                    }
                     state.handle_key(code, pressed, event.repeat);
                     window.request_redraw();
                 }
@@ -496,6 +499,33 @@ impl State {
         }
     }
 
+    fn compute_viewport(&self) -> Viewport {
+        let window_w = self.size.width;
+        let window_h = self.size.height;
+        if window_w == 0 || window_h == 0 {
+            return Viewport::full(window_w, window_h);
+        }
+
+        let scale_w = window_w as f32 / FRAME_WIDTH as f32;
+        let scale_h = window_h as f32 / FRAME_HEIGHT as f32;
+        let scale = scale_w.min(scale_h);
+        let target_w = ((FRAME_WIDTH as f32) * scale).floor().max(1.0) as u32;
+        let target_h = ((FRAME_HEIGHT as f32) * scale).floor().max(1.0) as u32;
+        let x = window_w.saturating_sub(target_w) / 2;
+        let y = window_h.saturating_sub(target_h) / 2;
+
+        Viewport {
+            x: x as f32,
+            y: y as f32,
+            width: target_w as f32,
+            height: target_h as f32,
+            scissor_x: x,
+            scissor_y: y,
+            scissor_width: target_w,
+            scissor_height: target_h,
+        }
+    }
+
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let (mut padded, bytes_per_row) =
             prepare_framebuffer_upload(self.emulator.framebuffer().as_slice());
@@ -533,6 +563,7 @@ impl State {
             });
 
         {
+            let viewport = self.compute_viewport();
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -552,6 +583,20 @@ impl State {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            render_pass.set_viewport(
+                viewport.x,
+                viewport.y,
+                viewport.width,
+                viewport.height,
+                0.0,
+                1.0,
+            );
+            render_pass.set_scissor_rect(
+                viewport.scissor_x,
+                viewport.scissor_y,
+                viewport.scissor_width,
+                viewport.scissor_height,
+            );
             render_pass.set_pipeline(&self.pipeline);
             render_pass.set_bind_group(0, &self.bind_group, &[]);
             render_pass.draw(0..3, 0..1);
@@ -588,6 +633,43 @@ fn prepare_framebuffer_upload(frame: &[u8]) -> (Vec<u8>, u32) {
     (data, padded as u32)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Viewport {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    scissor_x: u32,
+    scissor_y: u32,
+    scissor_width: u32,
+    scissor_height: u32,
+}
+
+impl Viewport {
+    fn full(width: u32, height: u32) -> Self {
+        let width = width.max(1);
+        let height = height.max(1);
+        Self {
+            x: 0.0,
+            y: 0.0,
+            width: width as f32,
+            height: height as f32,
+            scissor_x: 0,
+            scissor_y: 0,
+            scissor_width: width,
+            scissor_height: height,
+        }
+    }
+}
+
+fn toggle_borderless_fullscreen(window: &winit::window::Window) {
+    if window.fullscreen().is_some() {
+        window.set_fullscreen(None);
+    } else {
+        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+    }
+}
+
 #[derive(Debug)]
 struct Overlay {
     entries: Vec<OverlayEntry>,
@@ -604,10 +686,9 @@ struct OverlayEntry {
 
 impl Overlay {
     fn new() -> Self {
-        let font = FontArc::try_from_slice(include_bytes!(
-            "../../assets/fonts/RobotoMono[wght].ttf"
-        ))
-            .expect("overlay font");
+        let font =
+            FontArc::try_from_slice(include_bytes!("../../assets/fonts/RobotoMono[wght].ttf"))
+                .expect("overlay font");
         Self {
             entries: Vec::new(),
             enabled: true,
