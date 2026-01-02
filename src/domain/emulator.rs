@@ -46,6 +46,18 @@ impl Emulator {
         self.bus.is_some()
     }
 
+    pub fn set_joyp_buttons(&mut self, mask: u8) {
+        if let Some(bus) = self.bus.as_mut() {
+            bus.set_joyp_buttons(mask);
+        }
+    }
+
+    pub fn set_joyp_dpad(&mut self, mask: u8) {
+        if let Some(bus) = self.bus.as_mut() {
+            bus.set_joyp_dpad(mask);
+        }
+    }
+
     pub fn step_frame(&mut self) -> Result<u32, CpuError> {
         if let Some(err) = self.cpu_error {
             return Err(err);

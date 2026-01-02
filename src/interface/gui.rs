@@ -3,8 +3,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use winit::dpi::PhysicalSize;
-use winit::event::{Event, WindowEvent};
+use winit::event::{ElementState, Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::WindowBuilder;
 
 use crate::application::app;
@@ -58,6 +59,13 @@ async fn run_async(rom_path: Option<PathBuf>) {
         Event::WindowEvent { event, window_id } if window_id == target_window_id => match event {
             WindowEvent::CloseRequested => elwt.exit(),
             WindowEvent::Resized(size) => state.resize(size),
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    let pressed = event.state == ElementState::Pressed;
+                    state.handle_key(code, pressed);
+                    window.request_redraw();
+                }
+            }
             WindowEvent::RedrawRequested => {
                 state.update_frame();
                 match state.render() {
@@ -151,6 +159,68 @@ struct State {
     frame_index: u8,
     rom_bytes: Option<Vec<u8>>,
     rom_frame_ready: bool,
+    input: InputState,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct InputState {
+    right: bool,
+    left: bool,
+    up: bool,
+    down: bool,
+    a: bool,
+    b: bool,
+    select: bool,
+    start: bool,
+}
+
+impl InputState {
+    fn handle_key(&mut self, code: KeyCode, pressed: bool) {
+        match code {
+            KeyCode::ArrowRight => self.right = pressed,
+            KeyCode::ArrowLeft => self.left = pressed,
+            KeyCode::ArrowUp => self.up = pressed,
+            KeyCode::ArrowDown => self.down = pressed,
+            KeyCode::KeyZ => self.a = pressed,
+            KeyCode::KeyX => self.b = pressed,
+            KeyCode::Enter => self.start = pressed,
+            KeyCode::ShiftLeft | KeyCode::ShiftRight => self.select = pressed,
+            _ => {}
+        }
+    }
+
+    fn apply(&self, emulator: &mut Emulator) {
+        let mut dpad = 0x0F;
+        if self.right {
+            dpad &= !0x01;
+        }
+        if self.left {
+            dpad &= !0x02;
+        }
+        if self.up {
+            dpad &= !0x04;
+        }
+        if self.down {
+            dpad &= !0x08;
+        }
+
+        let mut buttons = 0x0F;
+        if self.a {
+            buttons &= !0x01;
+        }
+        if self.b {
+            buttons &= !0x02;
+        }
+        if self.select {
+            buttons &= !0x04;
+        }
+        if self.start {
+            buttons &= !0x08;
+        }
+
+        emulator.set_joyp_dpad(dpad);
+        emulator.set_joyp_buttons(buttons);
+    }
 }
 
 impl State {
@@ -320,6 +390,7 @@ impl State {
             frame_index: 0,
             rom_bytes,
             rom_frame_ready: false,
+            input: InputState::default(),
         }
     }
 
@@ -334,6 +405,7 @@ impl State {
     }
 
     fn update_frame(&mut self) {
+        self.input.apply(&mut self.emulator);
         let _ = self.emulator.step_frame();
         if self.emulator.has_bus() {
             return;
@@ -361,6 +433,11 @@ impl State {
                 pixels[idx + 2] = b;
             }
         }
+    }
+
+    fn handle_key(&mut self, code: KeyCode, pressed: bool) {
+        self.input.handle_key(code, pressed);
+        self.input.apply(&mut self.emulator);
     }
 
     fn render_rom_tiles(framebuffer: &mut [u8], rom: &[u8]) {
