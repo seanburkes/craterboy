@@ -363,6 +363,13 @@ impl Cpu {
                 self.regs.a = self.rlca(self.regs.a);
                 Ok(4)
             }
+            0x08 => {
+                let addr = self.fetch16(bus);
+                let [lo, hi] = self.sp.to_le_bytes();
+                bus.write8(addr, lo);
+                bus.write8(addr.wrapping_add(1), hi);
+                Ok(20)
+            }
             0x01 => {
                 let value = self.fetch16(bus);
                 self.regs.set_bc(value);
@@ -776,6 +783,10 @@ impl Cpu {
             0xF2 => {
                 let addr = 0xFF00u16.wrapping_add(self.regs.c as u16);
                 self.regs.a = bus.read8(addr);
+                Ok(8)
+            }
+            0xF9 => {
+                self.sp = self.regs.hl();
                 Ok(8)
             }
             0xFB => {
@@ -2002,6 +2013,32 @@ mod tests {
         assert_eq!(cpu.regs().a(), 0x85);
         assert!(cpu.regs().flag_c());
         assert!(!cpu.regs().flag_z());
+    }
+
+    #[test]
+    fn cpu_ld_sp_and_store_sp() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x31;
+        rom[0x0001] = 0x34;
+        rom[0x0002] = 0x12;
+        rom[0x0003] = 0x08;
+        rom[0x0004] = 0x00;
+        rom[0x0005] = 0xC0;
+        rom[0x0006] = 0x21;
+        rom[0x0007] = 0x78;
+        rom[0x0008] = 0x56;
+        rom[0x0009] = 0xF9;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+
+        cpu.step(&mut bus).expect("ld sp,d16");
+        cpu.step(&mut bus).expect("ld (a16),sp");
+        assert_eq!(bus.read8(0xC000), 0x34);
+        assert_eq!(bus.read8(0xC001), 0x12);
+
+        cpu.step(&mut bus).expect("ld hl,d16");
+        cpu.step(&mut bus).expect("ld sp,hl");
+        assert_eq!(cpu.sp(), 0x5678);
     }
 
     #[test]
