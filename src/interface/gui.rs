@@ -25,22 +25,20 @@ const DMG_PALETTE: [[u8; 3]; 4] = [
     [0x08, 0x18, 0x20],
 ];
 
-pub fn run(rom_path: Option<PathBuf>) {
-    pollster::block_on(run_async(rom_path));
+pub fn run(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
+    pollster::block_on(run_async(rom_path, boot_rom_path));
 }
 
-async fn run_async(rom_path: Option<PathBuf>) {
+async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
     let cartridge = load_rom_cartridge(rom_path);
     let rom_bytes = cartridge.as_ref().map(|cart| cart.bytes.clone());
+    let boot_rom = load_boot_rom(boot_rom_path);
     let event_loop = EventLoop::new().expect("event loop");
     let window = Arc::new(
         WindowBuilder::new()
             .with_title("craterboy")
             .with_inner_size(PhysicalSize::new(640, 576))
-            .with_min_inner_size(PhysicalSize::new(
-                FRAME_WIDTH_U32,
-                FRAME_HEIGHT_U32,
-            ))
+            .with_min_inner_size(PhysicalSize::new(FRAME_WIDTH_U32, FRAME_HEIGHT_U32))
             .build(&event_loop)
             .expect("window"),
     );
@@ -54,7 +52,7 @@ async fn run_async(rom_path: Option<PathBuf>) {
     let surface = instance
         .create_surface(Arc::clone(&window))
         .expect("surface");
-    let mut state = State::new(instance, surface, size, cartridge, rom_bytes).await;
+    let mut state = State::new(instance, surface, size, cartridge, rom_bytes, boot_rom).await;
     let frame_interval = Duration::from_nanos(1_000_000_000 / 60);
     let mut next_frame = Instant::now();
     let mut fps_last = Instant::now();
@@ -126,6 +124,19 @@ fn load_rom_cartridge(path: Option<PathBuf>) -> Option<Cartridge> {
         Ok(cartridge) => Some(cartridge),
         Err(err) => {
             report_rom_error(&path, err);
+            None
+        }
+    }
+}
+
+fn load_boot_rom(path: Option<PathBuf>) -> Option<Vec<u8>> {
+    let Some(path) = path else {
+        return None;
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(err) => {
+            eprintln!("Failed to read boot ROM '{}': {}", path.display(), err);
             None
         }
     }
@@ -240,6 +251,7 @@ impl State {
         size: PhysicalSize<u32>,
         cartridge: Option<Cartridge>,
         rom_bytes: Option<Vec<u8>>,
+        boot_rom: Option<Vec<u8>>,
     ) -> Self {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -380,7 +392,7 @@ impl State {
 
         let mut emulator = Emulator::new();
         if let Some(cartridge) = cartridge {
-            if let Err(err) = emulator.load_cartridge(cartridge) {
+            if let Err(err) = emulator.load_cartridge_with_boot_rom(cartridge, boot_rom) {
                 eprintln!("Failed to initialize cartridge: {:?}", err);
             }
         }

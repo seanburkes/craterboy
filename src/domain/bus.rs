@@ -20,10 +20,35 @@ const REG_TIMA: u16 = 0xFF05;
 const REG_TMA: u16 = 0xFF06;
 const REG_TAC: u16 = 0xFF07;
 const REG_IF: u16 = 0xFF0F;
+const REG_NR10: u16 = 0xFF10;
+const REG_NR11: u16 = 0xFF11;
+const REG_NR12: u16 = 0xFF12;
+const REG_NR14: u16 = 0xFF14;
+const REG_NR21: u16 = 0xFF16;
+const REG_NR22: u16 = 0xFF17;
+const REG_NR24: u16 = 0xFF19;
+const REG_NR30: u16 = 0xFF1A;
+const REG_NR31: u16 = 0xFF1B;
+const REG_NR32: u16 = 0xFF1C;
+const REG_NR34: u16 = 0xFF1E;
+const REG_NR41: u16 = 0xFF20;
+const REG_NR42: u16 = 0xFF21;
+const REG_NR43: u16 = 0xFF22;
+const REG_NR44: u16 = 0xFF23;
+const REG_NR50: u16 = 0xFF24;
+const REG_NR51: u16 = 0xFF25;
+const REG_NR52: u16 = 0xFF26;
 const REG_STAT: u16 = 0xFF41;
+const REG_SCY: u16 = 0xFF42;
+const REG_SCX: u16 = 0xFF43;
 const REG_LYC: u16 = 0xFF45;
 const REG_DMA: u16 = 0xFF46;
 const REG_LY: u16 = 0xFF44;
+const REG_BGP: u16 = 0xFF47;
+const REG_OBP0: u16 = 0xFF48;
+const REG_OBP1: u16 = 0xFF49;
+const REG_WY: u16 = 0xFF4A;
+const REG_WX: u16 = 0xFF4B;
 const REG_KEY1: u16 = 0xFF4D;
 const IF_VBLANK: u8 = 0x01;
 const IF_STAT: u8 = 0x02;
@@ -198,9 +223,63 @@ impl Bus {
     pub fn set_rtc_mode(&mut self, mode: RtcMode) {
         self.mbc.set_rtc_mode(mode);
     }
+
+    pub fn apply_post_boot_state(&mut self) {
+        self.boot_rom_enabled = false;
+        self.div = 0xAB;
+        self.div_counter = (self.div as u16) << 8;
+        self.tima = 0x00;
+        self.tma = 0x00;
+        self.tac = 0x00;
+        self.tima_counter = 0;
+        self.interrupt_flag = 0xE1;
+        self.interrupt_enable = 0x00;
+        self.ly = 0x00;
+        self.lyc = 0x00;
+        self.ppu_line_cycles = 0;
+        self.ppu_mode = 0;
+        self.stat = 0x80;
+
+        self.set_io_reg(REG_NR10, 0x80);
+        self.set_io_reg(REG_NR11, 0xBF);
+        self.set_io_reg(REG_NR12, 0xF3);
+        self.set_io_reg(REG_NR14, 0xBF);
+        self.set_io_reg(REG_NR21, 0x3F);
+        self.set_io_reg(REG_NR22, 0x00);
+        self.set_io_reg(REG_NR24, 0xBF);
+        self.set_io_reg(REG_NR30, 0x7F);
+        self.set_io_reg(REG_NR31, 0xFF);
+        self.set_io_reg(REG_NR32, 0x9F);
+        self.set_io_reg(REG_NR34, 0xBF);
+        self.set_io_reg(REG_NR41, 0xFF);
+        self.set_io_reg(REG_NR42, 0x00);
+        self.set_io_reg(REG_NR43, 0x00);
+        self.set_io_reg(REG_NR44, 0xBF);
+        self.set_io_reg(REG_NR50, 0x77);
+        self.set_io_reg(REG_NR51, 0xF3);
+        self.set_io_reg(REG_NR52, 0xF1);
+
+        self.set_io_reg(REG_LCDC, 0x91);
+        self.set_io_reg(REG_SCY, 0x00);
+        self.set_io_reg(REG_SCX, 0x00);
+        self.set_io_reg(REG_BGP, 0xFC);
+        self.set_io_reg(REG_OBP0, 0xFF);
+        self.set_io_reg(REG_OBP1, 0xFF);
+        self.set_io_reg(REG_WY, 0x00);
+        self.set_io_reg(REG_WX, 0x00);
+
+        self.update_stat();
+    }
 }
 
 impl Bus {
+    fn set_io_reg(&mut self, addr: u16, value: u8) {
+        let idx = addr.wrapping_sub(0xFF00) as usize;
+        if idx < IO_SIZE {
+            self.io[idx] = value;
+        }
+    }
+
     fn read_io(&self, addr: u16) -> u8 {
         match addr {
             REG_JOYP => self.read_joyp(),

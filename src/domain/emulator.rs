@@ -27,10 +27,26 @@ impl Emulator {
     }
 
     pub fn load_cartridge(&mut self, cartridge: Cartridge) -> Result<(), MbcError> {
-        self.bus = Some(Bus::new(cartridge)?);
+        self.load_cartridge_with_boot_rom(cartridge, None)
+    }
+
+    pub fn load_cartridge_with_boot_rom(
+        &mut self,
+        cartridge: Cartridge,
+        boot_rom: Option<Vec<u8>>,
+    ) -> Result<(), MbcError> {
+        let mut bus = Bus::with_boot_rom(cartridge, boot_rom)?;
         self.cpu = Cpu::new();
         self.cpu_error = None;
         self.ppu = Ppu::new();
+        if bus.boot_rom_enabled() {
+            self.booted = false;
+        } else {
+            self.cpu.apply_post_boot_state();
+            bus.apply_post_boot_state();
+            self.booted = true;
+        }
+        self.bus = Some(bus);
         Ok(())
     }
 

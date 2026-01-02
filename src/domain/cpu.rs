@@ -296,6 +296,20 @@ impl Cpu {
         }
     }
 
+    pub fn apply_post_boot_state(&mut self) {
+        self.regs.set_af(0x01B0);
+        self.regs.set_bc(0x0013);
+        self.regs.set_de(0x00D8);
+        self.regs.set_hl(0x014D);
+        self.pc = 0x0100;
+        self.sp = 0xFFFE;
+        self.ime = false;
+        self.ime_delay = 0;
+        self.halt_bug = false;
+        self.halted = false;
+        self.stopped = false;
+    }
+
     pub fn regs(&self) -> &Registers {
         &self.regs
     }
