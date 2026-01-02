@@ -359,6 +359,10 @@ impl Cpu {
         let opcode = self.fetch8(bus);
         let cycles = match opcode {
             0x00 => Ok(4),
+            0x07 => {
+                self.regs.a = self.rlca(self.regs.a);
+                Ok(4)
+            }
             0x01 => {
                 let value = self.fetch16(bus);
                 self.regs.set_bc(value);
@@ -408,6 +412,10 @@ impl Cpu {
                 self.regs.c = value;
                 Ok(8)
             }
+            0x0F => {
+                self.regs.a = self.rrca(self.regs.a);
+                Ok(4)
+            }
             0x11 => {
                 let value = self.fetch16(bus);
                 self.regs.set_de(value);
@@ -438,6 +446,10 @@ impl Cpu {
                 self.regs.e = value;
                 Ok(8)
             }
+            0x17 => {
+                self.regs.a = self.rla(self.regs.a);
+                Ok(4)
+            }
             0x1B => {
                 let value = self.regs.de().wrapping_sub(1);
                 self.regs.set_de(value);
@@ -457,6 +469,10 @@ impl Cpu {
                 let value = self.fetch8(bus);
                 self.regs.l = value;
                 Ok(8)
+            }
+            0x1F => {
+                self.regs.a = self.rra(self.regs.a);
+                Ok(4)
             }
             0x23 => {
                 let value = self.regs.hl().wrapping_add(1);
@@ -1081,6 +1097,12 @@ impl Cpu {
         next
     }
 
+    fn rlca(&mut self, value: u8) -> u8 {
+        let next = self.rlc(value);
+        self.regs.set_flag_z(false);
+        next
+    }
+
     fn rrc(&mut self, value: u8) -> u8 {
         let carry = value & 0x01 != 0;
         let next = value.rotate_right(1);
@@ -1088,6 +1110,12 @@ impl Cpu {
         self.regs.set_flag_n(false);
         self.regs.set_flag_h(false);
         self.regs.set_flag_c(carry);
+        next
+    }
+
+    fn rrca(&mut self, value: u8) -> u8 {
+        let next = self.rrc(value);
+        self.regs.set_flag_z(false);
         next
     }
 
@@ -1102,6 +1130,12 @@ impl Cpu {
         next
     }
 
+    fn rla(&mut self, value: u8) -> u8 {
+        let next = self.rl(value);
+        self.regs.set_flag_z(false);
+        next
+    }
+
     fn rr(&mut self, value: u8) -> u8 {
         let carry_in = if self.regs.flag_c() { 0x80 } else { 0 };
         let carry_out = value & 0x01 != 0;
@@ -1110,6 +1144,12 @@ impl Cpu {
         self.regs.set_flag_n(false);
         self.regs.set_flag_h(false);
         self.regs.set_flag_c(carry_out);
+        next
+    }
+
+    fn rra(&mut self, value: u8) -> u8 {
+        let next = self.rr(value);
+        self.regs.set_flag_z(false);
         next
     }
 
@@ -1927,6 +1967,41 @@ mod tests {
         assert_eq!(cycles, 8);
         let cycles = cpu.step(&mut bus).expect("cb set 0,(hl)");
         assert_eq!(cycles, 16);
+    }
+
+    #[test]
+    fn cpu_accumulator_rotates() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x3E;
+        rom[0x0001] = 0x85;
+        rom[0x0002] = 0x07;
+        rom[0x0003] = 0x0F;
+        rom[0x0004] = 0x17;
+        rom[0x0005] = 0x1F;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        cpu.regs_mut().set_flag_c(false);
+
+        cpu.step(&mut bus).expect("ld a,d8");
+        cpu.step(&mut bus).expect("rlca");
+        assert_eq!(cpu.regs().a(), 0x0B);
+        assert!(cpu.regs().flag_c());
+        assert!(!cpu.regs().flag_z());
+
+        cpu.step(&mut bus).expect("rrca");
+        assert_eq!(cpu.regs().a(), 0x85);
+        assert!(cpu.regs().flag_c());
+        assert!(!cpu.regs().flag_z());
+
+        cpu.step(&mut bus).expect("rla");
+        assert_eq!(cpu.regs().a(), 0x0B);
+        assert!(cpu.regs().flag_c());
+        assert!(!cpu.regs().flag_z());
+
+        cpu.step(&mut bus).expect("rra");
+        assert_eq!(cpu.regs().a(), 0x85);
+        assert!(cpu.regs().flag_c());
+        assert!(!cpu.regs().flag_z());
     }
 
     #[test]
