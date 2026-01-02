@@ -2105,6 +2105,42 @@ mod tests {
     }
 
     #[test]
+    fn cpu_daa_mooneye_vectors() {
+        // Vectors derived from mooneye-test-suite acceptance/instr/daa.s (MIT).
+        let data = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/mooneye_daa_vectors.hex"
+        ));
+        let bytes: Vec<u8> = data
+            .split_whitespace()
+            .map(|token| u8::from_str_radix(token, 16).expect("hex byte"))
+            .collect();
+        assert_eq!(bytes.len(), 4096 * 4);
+
+        for (idx, chunk) in bytes.chunks_exact(4).enumerate() {
+            let input_a = chunk[0];
+            let input_flags = chunk[1];
+            let expected_a = chunk[2];
+            let expected_flags = chunk[3];
+
+            let mut cpu = Cpu::new();
+            cpu.regs_mut().set_a(input_a);
+            cpu.regs_mut().set_flag_z(input_flags & 0x08 != 0);
+            cpu.regs_mut().set_flag_n(input_flags & 0x04 != 0);
+            cpu.regs_mut().set_flag_h(input_flags & 0x02 != 0);
+            cpu.regs_mut().set_flag_c(input_flags & 0x01 != 0);
+
+            cpu.daa();
+
+            assert_eq!(cpu.regs().a(), expected_a, "case {idx}");
+            assert_eq!(cpu.regs().flag_z(), expected_flags & 0x08 != 0, "case {idx}");
+            assert_eq!(cpu.regs().flag_n(), expected_flags & 0x04 != 0, "case {idx}");
+            assert_eq!(cpu.regs().flag_h(), expected_flags & 0x02 != 0, "case {idx}");
+            assert_eq!(cpu.regs().flag_c(), expected_flags & 0x01 != 0, "case {idx}");
+        }
+    }
+
+    #[test]
     fn cpu_misc_flags_ops() {
         let mut rom = vec![0; ROM_BANK_SIZE];
         rom[0x0000] = 0x3E;
