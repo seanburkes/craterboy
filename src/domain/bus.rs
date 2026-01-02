@@ -11,6 +11,7 @@ const OPEN_BUS: u8 = 0xFF;
 const CYCLES_PER_LINE: u16 = 456;
 const VBLANK_START: u8 = 144;
 const TOTAL_LINES: u8 = 154;
+const DMA_CYCLES: u32 = 160;
 
 const REG_JOYP: u16 = 0xFF00;
 const REG_LCDC: u16 = 0xFF40;
@@ -53,6 +54,9 @@ pub struct Bus {
     joyp_buttons: u8,
     joyp_dpad: u8,
     dma: u8,
+    dma_active: bool,
+    dma_cycles_remaining: u32,
+    dma_base: u16,
     interrupt_flag: u8,
     interrupt_enable: u8,
 }
@@ -93,6 +97,9 @@ impl Bus {
             joyp_buttons: 0x0F,
             joyp_dpad: 0x0F,
             dma: 0,
+            dma_active: false,
+            dma_cycles_remaining: 0,
+            dma_base: 0,
             interrupt_flag: 0,
             interrupt_enable: 0,
         })
@@ -108,6 +115,14 @@ impl Bus {
 
     pub fn vram(&self) -> &[u8] {
         &self.vram
+    }
+
+    pub fn set_joyp_buttons(&mut self, mask: u8) {
+        self.joyp_buttons = mask & 0x0F;
+    }
+
+    pub fn set_joyp_dpad(&mut self, mask: u8) {
+        self.joyp_dpad = mask & 0x0F;
     }
 
     pub fn disable_boot_rom(&mut self) {
@@ -160,6 +175,7 @@ impl Bus {
         self.step_div(cycles);
         self.step_timer(cycles);
         self.step_ppu(cycles);
+        self.step_dma(cycles);
         self.mbc.tick(cycles);
     }
 
@@ -208,11 +224,9 @@ impl Bus {
             }
             REG_DMA => {
                 self.dma = value;
-                let base = (value as u16) << 8;
-                for i in 0..OAM_SIZE {
-                    let byte = self.read8(base.wrapping_add(i as u16));
-                    self.oam[i] = byte;
-                }
+                self.dma_active = true;
+                self.dma_cycles_remaining = DMA_CYCLES;
+                self.dma_base = (value as u16) << 8;
             }
             _ => self.io[(addr as usize - 0xFF00) % IO_SIZE] = value,
         }
@@ -247,6 +261,25 @@ impl Bus {
             } else {
                 self.tima = next;
             }
+        }
+    }
+
+    fn step_dma(&mut self, cycles: u32) {
+        if !self.dma_active {
+            return;
+        }
+        if cycles >= self.dma_cycles_remaining {
+            self.dma_cycles_remaining = 0;
+        } else {
+            self.dma_cycles_remaining -= cycles;
+        }
+        if self.dma_cycles_remaining == 0 {
+            let base = self.dma_base;
+            for i in 0..OAM_SIZE {
+                let byte = self.read8(base.wrapping_add(i as u16));
+                self.oam[i] = byte;
+            }
+            self.dma_active = false;
         }
     }
 
@@ -327,8 +360,8 @@ impl Bus {
 #[cfg(test)]
 mod tests {
     use super::{
-        BOOT_ROM_SIZE, Bus, IF_TIMER, REG_DIV, REG_IF, REG_JOYP, REG_LY, REG_LYC, REG_STAT,
-        REG_TAC, REG_TIMA, REG_TMA,
+        BOOT_ROM_SIZE, Bus, DMA_CYCLES, IF_TIMER, REG_DIV, REG_IF, REG_JOYP, REG_LY, REG_LYC,
+        REG_STAT, REG_TAC, REG_TIMA, REG_TMA,
     };
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
@@ -396,12 +429,15 @@ mod tests {
         let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
         let mut bus = Bus::new(cartridge).expect("bus");
 
+        bus.set_joyp_buttons(0x0E);
+        bus.set_joyp_dpad(0x0D);
+
         bus.write8(REG_JOYP, 0x30);
         assert_eq!(bus.read8(REG_JOYP), 0xFF);
         bus.write8(REG_JOYP, 0x20);
-        assert_eq!(bus.read8(REG_JOYP), 0xEF);
+        assert_eq!(bus.read8(REG_JOYP), 0xED);
         bus.write8(REG_JOYP, 0x10);
-        assert_eq!(bus.read8(REG_JOYP), 0xDF);
+        assert_eq!(bus.read8(REG_JOYP), 0xDE);
     }
 
     #[test]
@@ -415,6 +451,8 @@ mod tests {
             bus.write8(0xC000 + i, (i as u8).wrapping_add(1));
         }
         bus.write8(0xFF46, 0xC0);
+        assert_eq!(bus.read8(0xFE00), 0x00);
+        bus.step(DMA_CYCLES);
 
         assert_eq!(bus.read8(0xFE00), 0x01);
         assert_eq!(bus.read8(0xFE9F), 0xA0);
