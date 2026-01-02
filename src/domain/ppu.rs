@@ -62,15 +62,15 @@ impl Ppu {
         let win_tile_map_base = if lcdc & 0x40 != 0 { 0x1C00 } else { 0x1800 };
         let use_unsigned = lcdc & 0x10 != 0;
         let window_enabled = lcdc & 0x20 != 0;
+        let window_active = window_enabled && wy <= 143 && wx <= 166;
         let width = FRAME_WIDTH;
         let height = FRAME_HEIGHT;
         let pixels = framebuffer.as_mut_slice();
 
         for y in 0..height {
             for x in 0..width {
-                let use_window = window_enabled
-                    && (y as u8) >= wy
-                    && (x as i16 + 7) >= wx as i16;
+                let use_window =
+                    window_active && (y as u8) >= wy && (x as i16 + 7) >= wx as i16;
 
                 let (tile_map_base, tile_x, tile_y, line_x, line_y) = if use_window {
                     let win_x = (x as i16 + 7 - wx as i16) as usize;
@@ -177,5 +177,53 @@ mod tests {
 
         ppu.render_frame(&bus, &mut framebuffer);
         assert_eq!(framebuffer.as_slice()[0], 0x34);
+    }
+
+    #[test]
+    fn render_frame_window_disabled_by_wy() {
+        let rom = vec![0; ROM_BANK_SIZE];
+        let mut bus = bus_with_rom(rom);
+        let mut framebuffer = Framebuffer::new();
+        let ppu = Ppu::new();
+
+        bus.write8(0xFF40, 0xF1);
+        bus.write8(0xFF47, 0xE4);
+        bus.write8(0xFF4A, 144);
+        bus.write8(0xFF4B, 0x07);
+
+        bus.write8(0x8000, 0x80);
+        bus.write8(0x8001, 0x00);
+        bus.write8(0x8010, 0x00);
+        bus.write8(0x8011, 0x80);
+
+        bus.write8(0x9800, 0x00);
+        bus.write8(0x9C00, 0x01);
+
+        ppu.render_frame(&bus, &mut framebuffer);
+        assert_eq!(framebuffer.as_slice()[0], 0x88);
+    }
+
+    #[test]
+    fn render_frame_window_disabled_by_wx() {
+        let rom = vec![0; ROM_BANK_SIZE];
+        let mut bus = bus_with_rom(rom);
+        let mut framebuffer = Framebuffer::new();
+        let ppu = Ppu::new();
+
+        bus.write8(0xFF40, 0xF1);
+        bus.write8(0xFF47, 0xE4);
+        bus.write8(0xFF4A, 0x00);
+        bus.write8(0xFF4B, 167);
+
+        bus.write8(0x8000, 0x80);
+        bus.write8(0x8001, 0x00);
+        bus.write8(0x8010, 0x00);
+        bus.write8(0x8011, 0x80);
+
+        bus.write8(0x9800, 0x00);
+        bus.write8(0x9C00, 0x01);
+
+        ppu.render_frame(&bus, &mut framebuffer);
+        assert_eq!(framebuffer.as_slice()[0], 0x88);
     }
 }
