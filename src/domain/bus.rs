@@ -8,13 +8,23 @@ const IO_SIZE: usize = 0x80;
 const HRAM_SIZE: usize = 0x7F;
 const OPEN_BUS: u8 = 0xFF;
 
+const CYCLES_PER_LINE: u16 = 456;
+const VBLANK_START: u8 = 144;
+const TOTAL_LINES: u8 = 154;
+
+const REG_JOYP: u16 = 0xFF00;
+const REG_LCDC: u16 = 0xFF40;
 const REG_DIV: u16 = 0xFF04;
 const REG_TIMA: u16 = 0xFF05;
 const REG_TMA: u16 = 0xFF06;
 const REG_TAC: u16 = 0xFF07;
 const REG_IF: u16 = 0xFF0F;
 const REG_STAT: u16 = 0xFF41;
+const REG_LYC: u16 = 0xFF45;
+const REG_DMA: u16 = 0xFF46;
 const REG_LY: u16 = 0xFF44;
+const IF_VBLANK: u8 = 0x01;
+const IF_STAT: u8 = 0x02;
 const IF_TIMER: u8 = 0x04;
 
 #[derive(Debug)]
@@ -35,7 +45,14 @@ pub struct Bus {
     tac: u8,
     tima_counter: u32,
     ly: u8,
+    lyc: u8,
     stat: u8,
+    ppu_line_cycles: u16,
+    ppu_mode: u8,
+    joyp_select: u8,
+    joyp_buttons: u8,
+    joyp_dpad: u8,
+    dma: u8,
     interrupt_flag: u8,
     interrupt_enable: u8,
 }
@@ -68,7 +85,14 @@ impl Bus {
             tac: 0,
             tima_counter: 0,
             ly: 0,
+            lyc: 0,
             stat: 0,
+            ppu_line_cycles: 0,
+            ppu_mode: 0,
+            joyp_select: 0x30,
+            joyp_buttons: 0x0F,
+            joyp_dpad: 0x0F,
+            dma: 0,
             interrupt_flag: 0,
             interrupt_enable: 0,
         })
@@ -135,6 +159,7 @@ impl Bus {
     pub fn step(&mut self, cycles: u32) {
         self.step_div(cycles);
         self.step_timer(cycles);
+        self.step_ppu(cycles);
         self.mbc.tick(cycles);
     }
 
@@ -146,6 +171,7 @@ impl Bus {
 impl Bus {
     fn read_io(&self, addr: u16) -> u8 {
         match addr {
+            REG_JOYP => self.read_joyp(),
             REG_DIV => self.div,
             REG_TIMA => self.tima,
             REG_TMA => self.tma,
@@ -153,12 +179,15 @@ impl Bus {
             REG_IF => self.interrupt_flag,
             REG_STAT => self.stat,
             REG_LY => self.ly,
+            REG_LYC => self.lyc,
+            REG_DMA => self.dma,
             _ => self.io[(addr as usize - 0xFF00) % IO_SIZE],
         }
     }
 
     fn write_io(&mut self, addr: u16, value: u8) {
         match addr {
+            REG_JOYP => self.joyp_select = value & 0x30,
             REG_DIV => {
                 self.div = 0;
                 self.div_counter = 0;
@@ -167,8 +196,24 @@ impl Bus {
             REG_TMA => self.tma = value,
             REG_TAC => self.tac = value,
             REG_IF => self.interrupt_flag = value,
-            REG_STAT => self.stat = value,
-            REG_LY => self.ly = 0,
+            REG_STAT => self.stat = (self.stat & 0x07) | (value & 0xF8),
+            REG_LY => {
+                self.ly = 0;
+                self.ppu_line_cycles = 0;
+                self.update_stat();
+            }
+            REG_LYC => {
+                self.lyc = value;
+                self.update_stat();
+            }
+            REG_DMA => {
+                self.dma = value;
+                let base = (value as u16) << 8;
+                for i in 0..OAM_SIZE {
+                    let byte = self.read8(base.wrapping_add(i as u16));
+                    self.oam[i] = byte;
+                }
+            }
             _ => self.io[(addr as usize - 0xFF00) % IO_SIZE] = value,
         }
     }
@@ -204,12 +249,86 @@ impl Bus {
             }
         }
     }
+
+    fn step_ppu(&mut self, cycles: u32) {
+        let lcdc = self.read_io(REG_LCDC);
+        if lcdc & 0x80 == 0 {
+            self.ly = 0;
+            self.ppu_line_cycles = 0;
+            self.ppu_mode = 0;
+            self.update_stat();
+            return;
+        }
+
+        let mut remaining = cycles;
+        while remaining > 0 {
+            let step = remaining.min(u32::from(u16::MAX));
+            self.ppu_line_cycles = self.ppu_line_cycles.wrapping_add(step as u16);
+            remaining -= step;
+            while self.ppu_line_cycles >= CYCLES_PER_LINE {
+                self.ppu_line_cycles -= CYCLES_PER_LINE;
+                self.ly = self.ly.wrapping_add(1);
+                if self.ly == VBLANK_START {
+                    self.interrupt_flag |= IF_VBLANK;
+                }
+                if self.ly >= TOTAL_LINES {
+                    self.ly = 0;
+                }
+                self.update_stat();
+            }
+        }
+
+        self.update_stat();
+    }
+
+    fn update_stat(&mut self) {
+        let mode = if self.ly >= VBLANK_START {
+            1
+        } else if self.ppu_line_cycles < 80 {
+            2
+        } else if self.ppu_line_cycles < 252 {
+            3
+        } else {
+            0
+        };
+
+        let mut stat = self.stat & 0xF8;
+        if self.ly == self.lyc {
+            stat |= 0x04;
+            if self.stat & 0x40 != 0 {
+                self.interrupt_flag |= IF_STAT;
+            }
+        }
+        if mode != self.ppu_mode {
+            match mode {
+                0 if self.stat & 0x08 != 0 => self.interrupt_flag |= IF_STAT,
+                1 if self.stat & 0x10 != 0 => self.interrupt_flag |= IF_STAT,
+                2 if self.stat & 0x20 != 0 => self.interrupt_flag |= IF_STAT,
+                _ => {}
+            }
+            self.ppu_mode = mode;
+        }
+        stat |= mode;
+        self.stat = stat;
+    }
+
+    fn read_joyp(&self) -> u8 {
+        let mut value = 0x0F;
+        if self.joyp_select & 0x10 == 0 {
+            value &= self.joyp_dpad;
+        }
+        if self.joyp_select & 0x20 == 0 {
+            value &= self.joyp_buttons;
+        }
+        0xC0 | self.joyp_select | value
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BOOT_ROM_SIZE, Bus, IF_TIMER, REG_DIV, REG_IF, REG_LY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA,
+        BOOT_ROM_SIZE, Bus, IF_TIMER, REG_DIV, REG_IF, REG_JOYP, REG_LY, REG_LYC, REG_STAT,
+        REG_TAC, REG_TIMA, REG_TMA,
     };
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
@@ -268,6 +387,62 @@ mod tests {
         assert_eq!(bus.read8(0xFE00), 0x78);
         assert_eq!(bus.read8(0xFF80), 0x9A);
         assert_eq!(bus.read8(0xFFFF), 0xBC);
+    }
+
+    #[test]
+    fn bus_joyp_selects_groups() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(REG_JOYP, 0x30);
+        assert_eq!(bus.read8(REG_JOYP), 0xFF);
+        bus.write8(REG_JOYP, 0x20);
+        assert_eq!(bus.read8(REG_JOYP), 0xEF);
+        bus.write8(REG_JOYP, 0x10);
+        assert_eq!(bus.read8(REG_JOYP), 0xDF);
+    }
+
+    #[test]
+    fn bus_dma_copies_to_oam() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        for i in 0..0xA0u16 {
+            bus.write8(0xC000 + i, (i as u8).wrapping_add(1));
+        }
+        bus.write8(0xFF46, 0xC0);
+
+        assert_eq!(bus.read8(0xFE00), 0x01);
+        assert_eq!(bus.read8(0xFE9F), 0xA0);
+    }
+
+    #[test]
+    fn bus_updates_ly_and_stat_mode() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(0xFF40, 0x80);
+        bus.step(1);
+        assert_eq!(bus.read8(REG_STAT) & 0x03, 0x02);
+
+        bus.step(80);
+        assert_eq!(bus.read8(REG_STAT) & 0x03, 0x03);
+
+        bus.step(172);
+        assert_eq!(bus.read8(REG_STAT) & 0x03, 0x00);
+
+        bus.step(456);
+        assert_eq!(bus.read8(REG_LY), 1);
+
+        bus.write8(REG_LYC, 1);
+        bus.step(1);
+        assert_eq!(bus.read8(REG_STAT) & 0x04, 0x04);
     }
 
     #[test]
