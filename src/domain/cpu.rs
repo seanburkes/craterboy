@@ -628,7 +628,11 @@ impl Cpu {
             }
             0x10 => {
                 let _ = self.fetch8(bus);
-                self.stopped = true;
+                if bus.speed_switch_pending() {
+                    bus.perform_speed_switch();
+                } else {
+                    self.stopped = true;
+                }
                 Ok(4)
             }
             0xC6 => {
@@ -1234,6 +1238,7 @@ impl Cpu {
         bus.write8(REG_IF, iflag & !mask);
         self.ime = false;
         self.ime_delay = 0;
+        self.halt_bug = false;
         self.push16(bus, self.pc);
         self.pc = addr;
         20
@@ -1819,6 +1824,34 @@ mod tests {
     }
 
     #[test]
+    fn cpu_halt_after_ei_services_interrupt_without_pc_glitch() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0xFB;
+        rom[0x0001] = 0x76;
+        rom[0x0002] = 0x3E;
+        rom[0x0003] = 0x12;
+        rom[0x0040] = 0xD9;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        bus.write8(REG_IE, 0x01);
+        bus.write8(REG_IF, 0x01);
+
+        cpu.step(&mut bus).expect("ei");
+        cpu.step(&mut bus).expect("halt");
+
+        let cycles = cpu.step(&mut bus).expect("interrupt");
+        assert_eq!(cycles, 20);
+        assert_eq!(cpu.pc(), 0x0040);
+
+        cpu.step(&mut bus).expect("reti");
+        assert_eq!(cpu.pc(), 0x0002);
+
+        cpu.step(&mut bus).expect("ld a,d8");
+        assert_eq!(cpu.regs().a(), 0x12);
+        assert_eq!(cpu.pc(), 0x0004);
+    }
+
+    #[test]
     fn cpu_stop_wakes_on_interrupt() {
         let mut rom = vec![0; ROM_BANK_SIZE];
         rom[0x0000] = 0x10;
@@ -1838,6 +1871,115 @@ mod tests {
 
         cpu.step(&mut bus).expect("ld a,d8");
         assert_eq!(cpu.regs().a(), 0x77);
+    }
+
+    #[test]
+    fn cpu_stop_speed_switch_does_not_halt() {
+        const REG_KEY1: u16 = 0xFF4D;
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x10;
+        rom[0x0001] = 0x00;
+        rom[0x0002] = 0x3E;
+        rom[0x0003] = 0x55;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        bus.write8(REG_KEY1, 0x01);
+
+        cpu.step(&mut bus).expect("stop");
+        assert_eq!(bus.read8(REG_KEY1) & 0x01, 0x00);
+        assert_eq!(bus.read8(REG_KEY1) & 0x80, 0x80);
+
+        cpu.step(&mut bus).expect("ld a,d8");
+        assert_eq!(cpu.regs().a(), 0x55);
+        assert_eq!(cpu.pc(), 0x0004);
+    }
+
+    #[test]
+    fn cpu_daa_after_addition_adjusts_bcd() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x3E;
+        rom[0x0001] = 0x15;
+        rom[0x0002] = 0xC6;
+        rom[0x0003] = 0x27;
+        rom[0x0004] = 0x27;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+
+        cpu.step(&mut bus).expect("ld a,d8");
+        cpu.step(&mut bus).expect("add a,d8");
+        cpu.step(&mut bus).expect("daa");
+
+        assert_eq!(cpu.regs().a(), 0x42);
+        assert!(!cpu.regs().flag_z());
+        assert!(!cpu.regs().flag_n());
+        assert!(!cpu.regs().flag_h());
+        assert!(!cpu.regs().flag_c());
+    }
+
+    #[test]
+    fn cpu_daa_after_addition_with_carry() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x3E;
+        rom[0x0001] = 0x99;
+        rom[0x0002] = 0xC6;
+        rom[0x0003] = 0x99;
+        rom[0x0004] = 0x27;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+
+        cpu.step(&mut bus).expect("ld a,d8");
+        cpu.step(&mut bus).expect("add a,d8");
+        cpu.step(&mut bus).expect("daa");
+
+        assert_eq!(cpu.regs().a(), 0x98);
+        assert!(!cpu.regs().flag_z());
+        assert!(!cpu.regs().flag_n());
+        assert!(!cpu.regs().flag_h());
+        assert!(cpu.regs().flag_c());
+    }
+
+    #[test]
+    fn cpu_daa_after_subtraction_adjusts_bcd() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x3E;
+        rom[0x0001] = 0x45;
+        rom[0x0002] = 0xD6;
+        rom[0x0003] = 0x12;
+        rom[0x0004] = 0x27;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+
+        cpu.step(&mut bus).expect("ld a,d8");
+        cpu.step(&mut bus).expect("sub d8");
+        cpu.step(&mut bus).expect("daa");
+
+        assert_eq!(cpu.regs().a(), 0x33);
+        assert!(!cpu.regs().flag_z());
+        assert!(cpu.regs().flag_n());
+        assert!(!cpu.regs().flag_h());
+        assert!(!cpu.regs().flag_c());
+    }
+
+    #[test]
+    fn cpu_daa_after_subtraction_with_borrow() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x3E;
+        rom[0x0001] = 0x00;
+        rom[0x0002] = 0xD6;
+        rom[0x0003] = 0x01;
+        rom[0x0004] = 0x27;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+
+        cpu.step(&mut bus).expect("ld a,d8");
+        cpu.step(&mut bus).expect("sub d8");
+        cpu.step(&mut bus).expect("daa");
+
+        assert_eq!(cpu.regs().a(), 0x99);
+        assert!(!cpu.regs().flag_z());
+        assert!(cpu.regs().flag_n());
+        assert!(!cpu.regs().flag_h());
+        assert!(cpu.regs().flag_c());
     }
 
     #[test]

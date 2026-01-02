@@ -24,6 +24,7 @@ const REG_STAT: u16 = 0xFF41;
 const REG_LYC: u16 = 0xFF45;
 const REG_DMA: u16 = 0xFF46;
 const REG_LY: u16 = 0xFF44;
+const REG_KEY1: u16 = 0xFF4D;
 const IF_VBLANK: u8 = 0x01;
 const IF_STAT: u8 = 0x02;
 const IF_TIMER: u8 = 0x04;
@@ -57,6 +58,8 @@ pub struct Bus {
     dma_active: bool,
     dma_cycles_remaining: u32,
     dma_base: u16,
+    double_speed: bool,
+    speed_switch_pending: bool,
     interrupt_flag: u8,
     interrupt_enable: u8,
 }
@@ -100,6 +103,8 @@ impl Bus {
             dma_active: false,
             dma_cycles_remaining: 0,
             dma_base: 0,
+            double_speed: false,
+            speed_switch_pending: false,
             interrupt_flag: 0,
             interrupt_enable: 0,
         })
@@ -123,6 +128,17 @@ impl Bus {
 
     pub fn set_joyp_dpad(&mut self, mask: u8) {
         self.joyp_dpad = mask & 0x0F;
+    }
+
+    pub fn speed_switch_pending(&self) -> bool {
+        self.speed_switch_pending
+    }
+
+    pub fn perform_speed_switch(&mut self) {
+        if self.speed_switch_pending {
+            self.speed_switch_pending = false;
+            self.double_speed = !self.double_speed;
+        }
     }
 
     pub fn disable_boot_rom(&mut self) {
@@ -197,6 +213,7 @@ impl Bus {
             REG_LY => self.ly,
             REG_LYC => self.lyc,
             REG_DMA => self.dma,
+            REG_KEY1 => self.read_key1(),
             _ => self.io[(addr as usize - 0xFF00) % IO_SIZE],
         }
     }
@@ -227,6 +244,9 @@ impl Bus {
                 self.dma_active = true;
                 self.dma_cycles_remaining = DMA_CYCLES;
                 self.dma_base = (value as u16) << 8;
+            }
+            REG_KEY1 => {
+                self.speed_switch_pending = value & 0x01 != 0;
             }
             _ => self.io[(addr as usize - 0xFF00) % IO_SIZE] = value,
         }
@@ -355,13 +375,24 @@ impl Bus {
         }
         0xC0 | self.joyp_select | value
     }
+
+    fn read_key1(&self) -> u8 {
+        let mut value = 0x7E;
+        if self.double_speed {
+            value |= 0x80;
+        }
+        if self.speed_switch_pending {
+            value |= 0x01;
+        }
+        value
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BOOT_ROM_SIZE, Bus, DMA_CYCLES, IF_TIMER, REG_DIV, REG_IF, REG_JOYP, REG_LY, REG_LYC,
-        REG_STAT, REG_TAC, REG_TIMA, REG_TMA,
+        BOOT_ROM_SIZE, Bus, DMA_CYCLES, IF_TIMER, REG_DIV, REG_IF, REG_JOYP, REG_KEY1, REG_LY,
+        REG_LYC, REG_STAT, REG_TAC, REG_TIMA, REG_TMA,
     };
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
@@ -481,6 +512,22 @@ mod tests {
         bus.write8(REG_LYC, 1);
         bus.step(1);
         assert_eq!(bus.read8(REG_STAT) & 0x04, 0x04);
+    }
+
+    #[test]
+    fn bus_key1_speed_switch() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(REG_KEY1, 0x01);
+        assert_eq!(bus.read8(REG_KEY1) & 0x01, 0x01);
+        assert_eq!(bus.read8(REG_KEY1) & 0x80, 0x00);
+
+        bus.perform_speed_switch();
+        assert_eq!(bus.read8(REG_KEY1) & 0x01, 0x00);
+        assert_eq!(bus.read8(REG_KEY1) & 0x80, 0x80);
     }
 
     #[test]
