@@ -335,6 +335,9 @@ impl State {
 
     fn update_frame(&mut self) {
         let _ = self.emulator.step_frame();
+        if self.emulator.has_bus() {
+            return;
+        }
         if let Some(rom) = self.rom_bytes.as_deref() {
             if !self.rom_frame_ready {
                 Self::render_rom_tiles(self.emulator.framebuffer_mut().as_mut_slice(), rom);

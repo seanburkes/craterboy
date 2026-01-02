@@ -340,6 +340,12 @@ impl Cpu {
                     return Ok(4);
                 }
             }
+            if self.stopped {
+                self.stopped = false;
+                if !self.ime {
+                    return Ok(4);
+                }
+            }
             if self.ime {
                 let cycles = self.service_interrupt(bus, pending);
                 return Ok(cycles);
@@ -1568,6 +1574,28 @@ mod tests {
         cpu.step(&mut bus).expect("ld a,d8");
         assert_eq!(cpu.regs().a(), 0x3E);
         assert_eq!(cpu.pc(), 0x0002);
+    }
+
+    #[test]
+    fn cpu_stop_wakes_on_interrupt() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0000] = 0x10;
+        rom[0x0001] = 0x00;
+        rom[0x0002] = 0x3E;
+        rom[0x0003] = 0x77;
+        let mut bus = bus_with_rom(rom);
+        let mut cpu = Cpu::new();
+        bus.write8(REG_IE, 0x01);
+        bus.write8(REG_IF, 0x01);
+
+        cpu.step(&mut bus).expect("stop");
+        assert_eq!(cpu.pc(), 0x0002);
+
+        let cycles = cpu.step(&mut bus).expect("wake");
+        assert_eq!(cycles, 4);
+
+        cpu.step(&mut bus).expect("ld a,d8");
+        assert_eq!(cpu.regs().a(), 0x77);
     }
 
     #[test]

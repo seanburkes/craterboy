@@ -1,6 +1,4 @@
-use super::{Bus, Cartridge, Cpu, CpuError, Framebuffer, MbcError};
-
-const FRAME_CYCLES: u32 = 70224;
+use super::{Bus, Cartridge, Cpu, CpuError, Framebuffer, MbcError, Ppu};
 
 #[derive(Debug)]
 pub struct Emulator {
@@ -9,6 +7,7 @@ pub struct Emulator {
     cpu: Cpu,
     bus: Option<Bus>,
     cpu_error: Option<CpuError>,
+    ppu: Ppu,
 }
 
 impl Emulator {
@@ -19,6 +18,7 @@ impl Emulator {
             cpu: Cpu::new(),
             bus: None,
             cpu_error: None,
+            ppu: Ppu::new(),
         }
     }
 
@@ -30,6 +30,7 @@ impl Emulator {
         self.bus = Some(Bus::new(cartridge)?);
         self.cpu = Cpu::new();
         self.cpu_error = None;
+        self.ppu = Ppu::new();
         Ok(())
     }
 
@@ -41,14 +42,19 @@ impl Emulator {
         &mut self.framebuffer
     }
 
+    pub fn has_bus(&self) -> bool {
+        self.bus.is_some()
+    }
+
     pub fn step_frame(&mut self) -> Result<u32, CpuError> {
         if let Some(err) = self.cpu_error {
             return Err(err);
         }
 
-        let mut cycles = 0;
         if let Some(bus) = self.bus.as_mut() {
-            while cycles < FRAME_CYCLES {
+            let mut cycles: u32 = 0;
+            let mut frame_ready = false;
+            while !frame_ready {
                 let step_cycles = match self.cpu.step(bus) {
                     Ok(count) => count,
                     Err(err) => {
@@ -57,11 +63,13 @@ impl Emulator {
                     }
                 };
                 bus.step(step_cycles);
+                frame_ready = self.ppu.step(step_cycles, bus, &mut self.framebuffer);
                 cycles = cycles.saturating_add(step_cycles);
             }
+            Ok(cycles)
+        } else {
+            Ok(0)
         }
-
-        Ok(cycles)
     }
 }
 

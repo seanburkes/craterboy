@@ -82,6 +82,10 @@ impl Bus {
         self.boot_rom_enabled
     }
 
+    pub fn vram(&self) -> &[u8] {
+        &self.vram
+    }
+
     pub fn disable_boot_rom(&mut self) {
         self.boot_rom_enabled = false;
     }
