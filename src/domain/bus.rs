@@ -101,6 +101,53 @@ impl Bus {
     ) -> Result<Self, MbcError> {
         let mbc = Mbc::new(&cartridge)?;
         let boot_rom_enabled = boot_rom.is_some();
+
+        let mut io = vec![0; IO_SIZE];
+        let mut stat = 0;
+        let mut dma = 0;
+        let mut interrupt_flag = 0;
+
+        if !boot_rom_enabled {
+            // Initialize IO registers to post-boot DMG defaults when no boot ROM
+            // See: https://gbdev.io/pandocs/#power-up-sequence
+            io[0x40] = 0x91; // LCDC - LCD enabled, BG/OBJ enabled, correct tile/map areas
+            io[0x41] = 0x85; // STAT - mode 1 (V-Blank), no interrupts
+            io[0x42] = 0x00; // SCY
+            io[0x43] = 0x00; // SCX
+            io[0x45] = 0x00; // LYC
+            dma = 0xFF; // DMA
+            io[0x47] = 0xFC; // BGP - standard grayscale palette
+            io[0x48] = 0xFF; // OBP0 - all white/transparent
+            io[0x49] = 0xFF; // OBP1 - all white/transparent
+            io[0x4A] = 0x00; // WY
+            io[0x4B] = 0x00; // WX
+
+            // Interrupt flags
+            interrupt_flag = 0xE1; // IF - VBLANK, STAT, TIMER, SERIAL, JOYPAD
+
+            // Sound registers (post-boot DMG defaults)
+            io[0x10] = 0x80; // NR10
+            io[0x11] = 0xBF; // NR11
+            io[0x12] = 0xF3; // NR12
+            io[0x14] = 0xBF; // NR14
+            io[0x16] = 0x3F; // NR21
+            io[0x17] = 0x00; // NR22
+            io[0x19] = 0xBF; // NR24
+            io[0x1A] = 0x7F; // NR30
+            io[0x1B] = 0xFF; // NR31
+            io[0x1C] = 0x9F; // NR32
+            io[0x1E] = 0xBF; // NR34
+            io[0x20] = 0xFF; // NR41
+            io[0x21] = 0x00; // NR42
+            io[0x22] = 0x00; // NR43
+            io[0x23] = 0xBF; // NR44
+            io[0x24] = 0x77; // NR50
+            io[0x25] = 0xF3; // NR51
+            io[0x26] = 0xF1; // NR52 - sound on
+
+            stat = 0x85;
+        }
+
         Ok(Self {
             cartridge,
             mbc,
@@ -110,7 +157,7 @@ impl Bus {
             vram: vec![0; VRAM_SIZE],
             wram: vec![0; WRAM_SIZE],
             oam: vec![0; OAM_SIZE],
-            io: vec![0; IO_SIZE],
+            io,
             hram: vec![0; HRAM_SIZE],
             div: 0,
             div_counter: 0,
@@ -120,19 +167,19 @@ impl Bus {
             tima_counter: 0,
             ly: 0,
             lyc: 0,
-            stat: 0,
+            stat,
             ppu_line_cycles: 0,
             ppu_mode: 0,
             joyp_select: 0x30,
             joyp_buttons: 0x0F,
             joyp_dpad: 0x0F,
-            dma: 0,
+            dma,
             dma_active: false,
             dma_cycles_remaining: 0,
             dma_base: 0,
             double_speed: false,
             speed_switch_pending: false,
-            interrupt_flag: 0,
+            interrupt_flag,
             interrupt_enable: 0,
         })
     }
@@ -481,8 +528,9 @@ impl Bus {
 #[cfg(test)]
 mod tests {
     use super::{
-        BOOT_ROM_SIZE, Bus, DMA_CYCLES, IF_TIMER, REG_DIV, REG_IF, REG_JOYP, REG_KEY1, REG_LY,
-        REG_LYC, REG_STAT, REG_TAC, REG_TIMA, REG_TMA,
+        BOOT_ROM_SIZE, Bus, DMA_CYCLES, IF_TIMER, REG_BGP, REG_DIV, REG_DMA, REG_IF, REG_JOYP,
+        REG_KEY1, REG_LCDC, REG_LY, REG_LYC, REG_OBP0, REG_OBP1, REG_SCX, REG_SCY, REG_STAT,
+        REG_TAC, REG_TIMA, REG_TMA, REG_WX, REG_WY,
     };
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
@@ -557,6 +605,52 @@ mod tests {
         // Writing to 0xFF50 has no effect
         bus.write8(0xFF50, 0x01);
         assert!(!bus.take_boot_rom_disabled());
+    }
+
+    #[test]
+    fn bus_initializes_post_boot_defaults_without_boot_rom() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+
+        let bus = Bus::new(cartridge).expect("bus");
+
+        // Verify key registers have post-boot DMG defaults
+        assert_eq!(bus.read8(REG_LCDC), 0x91, "LCDC should be 0x91");
+        assert_eq!(bus.read8(REG_STAT), 0x85, "STAT should be 0x85");
+        assert_eq!(bus.read8(REG_DMA), 0xFF, "DMA should be 0xFF");
+        assert_eq!(bus.read8(REG_BGP), 0xFC, "BGP should be 0xFC");
+        assert_eq!(bus.read8(REG_OBP0), 0xFF, "OBP0 should be 0xFF");
+        assert_eq!(bus.read8(REG_OBP1), 0xFF, "OBP1 should be 0xFF");
+        assert_eq!(bus.read8(REG_SCY), 0x00, "SCY should be 0x00");
+        assert_eq!(bus.read8(REG_SCX), 0x00, "SCX should be 0x00");
+        assert_eq!(bus.read8(REG_WY), 0x00, "WY should be 0x00");
+        assert_eq!(bus.read8(REG_WX), 0x00, "WX should be 0x00");
+        assert_eq!(bus.read8(REG_IF), 0xE1, "IF should be 0xE1");
+    }
+
+    #[test]
+    fn bus_zeroes_io_registers_with_boot_rom() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+
+        let boot_rom = vec![0xAA; BOOT_ROM_SIZE];
+        let bus = Bus::with_boot_rom(cartridge, Some(boot_rom)).expect("bus");
+
+        // With boot ROM, registers are zeroed (boot ROM will initialize them)
+        assert_eq!(
+            bus.read8(REG_LCDC),
+            0x00,
+            "LCDC should be 0x00 with boot ROM"
+        );
+        assert_eq!(
+            bus.read8(REG_STAT),
+            0x00,
+            "STAT should be 0x00 with boot ROM"
+        );
+        assert_eq!(bus.read8(REG_BGP), 0x00, "BGP should be 0x00 with boot ROM");
+        assert_eq!(bus.read8(REG_DMA), 0x00, "DMA should be 0x00 with boot ROM");
     }
 
     #[test]
@@ -675,7 +769,8 @@ mod tests {
         assert_eq!(bus.read8(REG_TIMA), 0x12);
         assert_eq!(bus.read8(REG_TMA), 0x34);
         assert_eq!(bus.read8(REG_TAC), 0x56);
-        assert_eq!(bus.read8(REG_STAT), 0x78);
+        // STAT preserves lower 3 bits (mode and LYC flag) on write
+        assert_eq!(bus.read8(REG_STAT) & 0xF8, 0x78);
         assert_eq!(bus.read8(REG_IF), 0x9A);
         assert_eq!(bus.read8(0xFFFF), 0xBC);
 
