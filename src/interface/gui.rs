@@ -282,12 +282,16 @@ impl InputState {
         self.down = axis_y > deadzone;
 
         // A/B face buttons
-        self.a = gamepad.is_pressed(gilrs::Button::South) || gamepad.is_pressed(gilrs::Button::East);
-        self.b = gamepad.is_pressed(gilrs::Button::West) || gamepad.is_pressed(gilrs::Button::North);
+        self.a =
+            gamepad.is_pressed(gilrs::Button::South) || gamepad.is_pressed(gilrs::Button::East);
+        self.b =
+            gamepad.is_pressed(gilrs::Button::West) || gamepad.is_pressed(gilrs::Button::North);
 
         // Start/Select
-        self.start = gamepad.is_pressed(gilrs::Button::Start) || gamepad.is_pressed(gilrs::Button::Mode);
-        self.select = gamepad.is_pressed(gilrs::Button::Select) || gamepad.is_pressed(gilrs::Button::LeftTrigger);
+        self.start =
+            gamepad.is_pressed(gilrs::Button::Start) || gamepad.is_pressed(gilrs::Button::Mode);
+        self.select = gamepad.is_pressed(gilrs::Button::Select)
+            || gamepad.is_pressed(gilrs::Button::LeftTrigger);
     }
 }
 

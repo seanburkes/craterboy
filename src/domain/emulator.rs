@@ -1,4 +1,4 @@
-use super::{Bus, Cartridge, Cpu, CpuError, Framebuffer, MbcError, Ppu};
+use super::{Apu, Bus, Cartridge, Cpu, CpuError, Framebuffer, MbcError, Ppu};
 
 #[derive(Debug)]
 pub struct Emulator {
@@ -8,6 +8,7 @@ pub struct Emulator {
     bus: Option<Bus>,
     cpu_error: Option<CpuError>,
     ppu: Ppu,
+    apu: Apu,
 }
 
 impl Emulator {
@@ -19,6 +20,7 @@ impl Emulator {
             bus: None,
             cpu_error: None,
             ppu: Ppu::new(),
+            apu: Apu::new(),
         }
     }
 
@@ -91,6 +93,7 @@ impl Emulator {
                     }
                 };
                 bus.step(step_cycles);
+                self.apu.step(step_cycles);
                 frame_ready = self.ppu.step(step_cycles, bus, &mut self.framebuffer);
                 cycles = cycles.saturating_add(step_cycles);
 

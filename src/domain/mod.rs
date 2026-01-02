@@ -1,3 +1,4 @@
+pub mod apu;
 pub mod bus;
 pub mod cartridge;
 pub mod cpu;
@@ -7,6 +8,7 @@ pub mod mbc;
 pub mod ppu;
 pub mod rom;
 
+pub use apu::Apu;
 pub use bus::Bus;
 pub use cartridge::{Cartridge, RomBankMapping, RomBankView};
 pub use cpu::{Cpu, CpuError, Registers};
