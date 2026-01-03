@@ -93,7 +93,7 @@ impl Emulator {
                     }
                 };
                 bus.step(step_cycles);
-                self.apu.step(step_cycles);
+                let _ = self.apu.step(step_cycles);
                 frame_ready = self.ppu.step(step_cycles, bus, &mut self.framebuffer);
                 cycles = cycles.saturating_add(step_cycles);
 

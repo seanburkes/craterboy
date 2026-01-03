@@ -23,9 +23,7 @@ const REG_NR44: u16 = 0xFF23;
 
 const FREQ_DIVISOR: u32 = 131072;
 const NOISE_CLOCK_BASE: u32 = 524288;
-const ENVELOPE_TICK_CYCLES: u32 = 256;
-const SWEEP_TICK_CYCLES: u32 = 128;
-const LENGTH_TICK_CYCLES: u32 = 256;
+const FRAME_SEQUENCER_CYCLES: u32 = 8192;
 
 const DUTY_CYCLES: [[u8; 8]; 4] = [
     [0, 0, 0, 0, 0, 0, 0, 1],
@@ -51,9 +49,6 @@ pub struct PulseChannel {
     sweep_shift: u8,
     sweep_counter: u8,
     timer: u32,
-    envelope_timer: u32,
-    sweep_timer: u32,
-    length_timer: u32,
     position: u8,
     envelope_counter: u8,
     current_volume: u8,
@@ -78,9 +73,6 @@ impl PulseChannel {
             sweep_shift: 0,
             sweep_counter: 0,
             timer: 0,
-            envelope_timer: 0,
-            sweep_timer: 0,
-            length_timer: 0,
             position: 0,
             envelope_counter: 0,
             current_volume: 0,
@@ -88,8 +80,12 @@ impl PulseChannel {
         }
     }
 
-    fn tick_sweep(&mut self) {
-        if !self.sweep_enable || self.sweep_period == 0 {
+    pub fn tick_sweep(&mut self) {
+        if !self.sweep_enable {
+            return;
+        }
+
+        if self.sweep_period == 0 {
             return;
         }
 
@@ -103,23 +99,25 @@ impl PulseChannel {
     }
 
     fn update_frequency(&mut self) {
-        if self.sweep_shift > 0 {
-            let new_freq = if self.sweep_add {
-                self.frequency + (self.frequency >> self.sweep_shift)
-            } else {
-                self.frequency
-                    .saturating_sub(self.frequency >> self.sweep_shift)
-            };
+        if self.sweep_shift == 0 {
+            return;
+        }
 
-            if new_freq > 2047 {
-                self.enabled = false;
-            } else {
-                self.frequency = new_freq;
-            }
+        let new_freq = if self.sweep_add {
+            self.frequency + (self.frequency >> self.sweep_shift)
+        } else {
+            self.frequency
+                .saturating_sub(self.frequency >> self.sweep_shift)
+        };
+
+        if new_freq > 2047 {
+            self.enabled = false;
+        } else {
+            self.frequency = new_freq;
         }
     }
 
-    fn step_envelope(&mut self) {
+    pub fn tick_envelope(&mut self) {
         if self.envelope_period == 0 {
             return;
         }
@@ -142,28 +140,23 @@ impl PulseChannel {
         }
     }
 
+    pub fn tick_length(&mut self) {
+        if !self.length_enable {
+            return;
+        }
+
+        if self.length_counter > 0 {
+            self.length_counter -= 1;
+            if self.length_counter == 0 {
+                self.enabled = false;
+            }
+        }
+    }
+
     pub fn step(&mut self, cycles: u32) -> i32 {
         if !self.enabled {
             self.output_volume = 0;
             return 0;
-        }
-
-        self.sweep_timer = self.sweep_timer.wrapping_add(cycles);
-        while self.sweep_timer >= SWEEP_TICK_CYCLES {
-            self.sweep_timer -= SWEEP_TICK_CYCLES;
-            self.tick_sweep();
-        }
-
-        self.envelope_timer = self.envelope_timer.wrapping_add(cycles);
-        while self.envelope_timer >= ENVELOPE_TICK_CYCLES {
-            self.envelope_timer -= ENVELOPE_TICK_CYCLES;
-            self.step_envelope();
-        }
-
-        self.length_timer = self.length_timer.wrapping_add(cycles);
-        while self.length_timer >= LENGTH_TICK_CYCLES {
-            self.length_timer -= LENGTH_TICK_CYCLES;
-            self.tick_length();
         }
 
         let freq = self.frequency as u32;
@@ -189,19 +182,6 @@ impl PulseChannel {
         self.output_volume
     }
 
-    fn tick_length(&mut self) {
-        if !self.length_enable {
-            return;
-        }
-
-        if self.length_counter > 0 {
-            self.length_counter -= 1;
-            if self.length_counter == 0 {
-                self.enabled = false;
-            }
-        }
-    }
-
     pub fn reset(&mut self) {
         self.enabled = false;
         self.length = 0;
@@ -218,9 +198,6 @@ impl PulseChannel {
         self.sweep_shift = 0;
         self.sweep_counter = 0;
         self.timer = 0;
-        self.envelope_timer = 0;
-        self.sweep_timer = 0;
-        self.length_timer = 0;
         self.position = 0;
         self.envelope_counter = 0;
         self.current_volume = 0;
@@ -294,9 +271,6 @@ impl PulseChannel {
         self.enabled = true;
         self.sweep_enable = true;
         self.timer = 0;
-        self.envelope_timer = 0;
-        self.sweep_timer = 0;
-        self.length_timer = 0;
         self.position = 0;
         self.current_volume = self.volume;
         self.envelope_counter = self.envelope_period;
@@ -329,7 +303,6 @@ pub struct WaveChannel {
     wave_ram: [u8; WAVE_RAM_SIZE],
     position: u8,
     timer: u32,
-    length_timer: u32,
     output_volume: i32,
 }
 
@@ -346,18 +319,11 @@ impl WaveChannel {
             wave_ram: [0xFF; WAVE_RAM_SIZE],
             position: 0,
             timer: 0,
-            length_timer: 0,
             output_volume: 0,
         }
     }
 
     pub fn step(&mut self, cycles: u32) -> i32 {
-        self.length_timer = self.length_timer.wrapping_add(cycles);
-        while self.length_timer >= LENGTH_TICK_CYCLES {
-            self.length_timer -= LENGTH_TICK_CYCLES;
-            self.tick_length();
-        }
-
         if !self.enabled || self.frequency == 0 {
             self.output_volume = 0;
             return 0;
@@ -394,7 +360,7 @@ impl WaveChannel {
         self.output_volume
     }
 
-    fn tick_length(&mut self) {
+    pub fn tick_length(&mut self) {
         if !self.length_enable {
             return;
         }
@@ -417,7 +383,6 @@ impl WaveChannel {
         self.trigger = false;
         self.position = 0;
         self.timer = 0;
-        self.length_timer = 0;
         self.output_volume = 0;
     }
 
@@ -467,7 +432,6 @@ impl WaveChannel {
                     self.enabled = true;
                     self.position = 0;
                     self.timer = 0;
-                    self.length_timer = 0;
                     self.length_counter = if self.length == 0 {
                         256
                     } else {
@@ -514,11 +478,9 @@ pub struct NoiseChannel {
     divisor_code: u8,
     lfsr: u16,
     timer: u32,
-    envelope_timer: u32,
     envelope_counter: u8,
     current_volume: u8,
     output_volume: i32,
-    length_timer: u32,
 }
 
 impl NoiseChannel {
@@ -536,11 +498,9 @@ impl NoiseChannel {
             divisor_code: 0,
             lfsr: 0,
             timer: 0,
-            envelope_timer: 0,
             envelope_counter: 0,
             current_volume: 0,
             output_volume: 0,
-            length_timer: 0,
         }
     }
 
@@ -558,58 +518,7 @@ impl NoiseChannel {
         }
     }
 
-    pub fn step(&mut self, cycles: u32) -> i32 {
-        if !self.enabled {
-            self.output_volume = 0;
-            return 0;
-        }
-
-        self.envelope_timer = self.envelope_timer.wrapping_add(cycles);
-        while self.envelope_timer >= ENVELOPE_TICK_CYCLES {
-            self.envelope_timer -= ENVELOPE_TICK_CYCLES;
-            self.step_envelope();
-        }
-
-        self.length_timer = self.length_timer.wrapping_add(cycles);
-        while self.length_timer >= LENGTH_TICK_CYCLES {
-            self.length_timer -= LENGTH_TICK_CYCLES;
-            self.tick_length();
-        }
-
-        let divisor = Self::divisor_value(self.divisor_code);
-        let shift = self.shift_clock_frequency;
-        let threshold = (NOISE_CLOCK_BASE / (divisor << shift)) / 2;
-
-        self.timer = self.timer.wrapping_add(cycles);
-
-        while self.timer >= threshold {
-            self.timer -= threshold;
-            self.clock_lfsr();
-        }
-
-        self.output_volume = if (self.lfsr & 0x01) == 0 {
-            self.current_volume as i32
-        } else {
-            -(self.current_volume as i32)
-        };
-
-        self.output_volume
-    }
-
-    fn tick_length(&mut self) {
-        if !self.length_enable {
-            return;
-        }
-
-        if self.length_counter > 0 {
-            self.length_counter -= 1;
-            if self.length_counter == 0 {
-                self.enabled = false;
-            }
-        }
-    }
-
-    fn step_envelope(&mut self) {
+    pub fn tick_envelope(&mut self) {
         if self.envelope_period == 0 {
             return;
         }
@@ -630,6 +539,45 @@ impl NoiseChannel {
                 self.current_volume -= 1;
             }
         }
+    }
+
+    pub fn tick_length(&mut self) {
+        if !self.length_enable {
+            return;
+        }
+
+        if self.length_counter > 0 {
+            self.length_counter -= 1;
+            if self.length_counter == 0 {
+                self.enabled = false;
+            }
+        }
+    }
+
+    pub fn step(&mut self, cycles: u32) -> i32 {
+        if !self.enabled {
+            self.output_volume = 0;
+            return 0;
+        }
+
+        let divisor = Self::divisor_value(self.divisor_code);
+        let shift = self.shift_clock_frequency;
+        let threshold = (NOISE_CLOCK_BASE / (divisor << shift)) / 2;
+
+        self.timer = self.timer.wrapping_add(cycles);
+
+        while self.timer >= threshold {
+            self.timer -= threshold;
+            self.clock_lfsr();
+        }
+
+        self.output_volume = if (self.lfsr & 0x01) == 0 {
+            self.current_volume as i32
+        } else {
+            -(self.current_volume as i32)
+        };
+
+        self.output_volume
     }
 
     fn clock_lfsr(&mut self) {
@@ -657,11 +605,9 @@ impl NoiseChannel {
         self.divisor_code = 0;
         self.lfsr = 0;
         self.timer = 0;
-        self.envelope_timer = 0;
         self.envelope_counter = 0;
         self.current_volume = 0;
         self.output_volume = 0;
-        self.length_timer = 0;
     }
 
     pub fn read_io(&self, addr: u16) -> u8 {
@@ -718,8 +664,6 @@ impl NoiseChannel {
         self.enabled = true;
         self.lfsr = 0x7FFF;
         self.timer = 0;
-        self.envelope_timer = 0;
-        self.length_timer = 0;
         self.current_volume = self.volume;
         self.envelope_counter = self.envelope_period;
         self.length_counter = if self.length == 0 { 64 } else { self.length };
@@ -733,6 +677,8 @@ impl NoiseChannel {
 #[derive(Debug)]
 pub struct Apu {
     frame_cycles: u32,
+    frame_sequencer_cycles: u32,
+    frame_sequencer_step: u8,
     pulse_channel: PulseChannel,
     wave_channel: WaveChannel,
     noise_channel: NoiseChannel,
@@ -744,6 +690,8 @@ impl Apu {
     pub fn new() -> Self {
         Self {
             frame_cycles: FRAME_CYCLES,
+            frame_sequencer_cycles: 0,
+            frame_sequencer_step: 0,
             pulse_channel: PulseChannel::new(),
             wave_channel: WaveChannel::new(),
             noise_channel: NoiseChannel::new(),
@@ -753,6 +701,12 @@ impl Apu {
     }
 
     pub fn step(&mut self, cycles: u32) -> Result<(), ()> {
+        self.frame_sequencer_cycles = self.frame_sequencer_cycles.wrapping_add(cycles);
+        while self.frame_sequencer_cycles >= FRAME_SEQUENCER_CYCLES {
+            self.frame_sequencer_cycles -= FRAME_SEQUENCER_CYCLES;
+            self.step_frame_sequencer();
+        }
+
         self.frame_cycles = self.frame_cycles.wrapping_add(cycles);
         self.pulse_channel.step(cycles);
         self.wave_channel.step(cycles);
@@ -765,6 +719,58 @@ impl Apu {
         }
 
         Ok(())
+    }
+
+    fn step_frame_sequencer(&mut self) {
+        match self.frame_sequencer_step {
+            0 => {
+                self.pulse_channel.tick_length();
+                self.wave_channel.tick_length();
+                self.noise_channel.tick_length();
+            }
+            1 => {
+                self.pulse_channel.tick_sweep();
+                self.pulse_channel.tick_length();
+                self.wave_channel.tick_length();
+                self.noise_channel.tick_length();
+            }
+            2 => {
+                self.pulse_channel.tick_length();
+                self.wave_channel.tick_length();
+                self.noise_channel.tick_length();
+            }
+            3 => {
+                self.pulse_channel.tick_envelope();
+                self.pulse_channel.tick_length();
+                self.wave_channel.tick_length();
+                self.noise_channel.tick_length();
+            }
+            4 => {
+                self.pulse_channel.tick_length();
+                self.wave_channel.tick_length();
+                self.noise_channel.tick_length();
+            }
+            5 => {
+                self.pulse_channel.tick_sweep();
+                self.pulse_channel.tick_length();
+                self.wave_channel.tick_length();
+                self.noise_channel.tick_length();
+            }
+            6 => {
+                self.pulse_channel.tick_length();
+                self.wave_channel.tick_length();
+                self.noise_channel.tick_length();
+            }
+            7 => {
+                self.pulse_channel.tick_envelope();
+                self.pulse_channel.tick_length();
+                self.wave_channel.tick_length();
+                self.noise_channel.tick_length();
+            }
+            _ => {}
+        }
+
+        self.frame_sequencer_step = (self.frame_sequencer_step + 1) & 0x07;
     }
 
     fn mix_sample(&mut self) {
@@ -785,6 +791,8 @@ impl Apu {
 
     pub fn reset(&mut self) {
         self.frame_cycles = FRAME_CYCLES;
+        self.frame_sequencer_cycles = 0;
+        self.frame_sequencer_step = 0;
         self.pulse_channel.reset();
         self.wave_channel.reset();
         self.noise_channel.reset();
@@ -952,6 +960,7 @@ mod tests {
         let mut disabled = false;
         for _ in 0..(128 * 500) {
             channel.step(128);
+            channel.tick_sweep();
             if !channel.enabled {
                 disabled = true;
                 break;
@@ -991,6 +1000,7 @@ mod tests {
         let start_freq = channel.frequency;
         for _ in 0..(128 * 10) {
             channel.step(128);
+            channel.tick_sweep();
         }
         assert!(
             channel.frequency >= start_freq,
@@ -1010,6 +1020,7 @@ mod tests {
         let start_freq = channel.frequency;
         for _ in 0..(128 * 10) {
             channel.step(128);
+            channel.tick_sweep();
         }
         assert!(
             channel.frequency <= start_freq,
@@ -1029,6 +1040,7 @@ mod tests {
         assert!(channel.sweep_enable);
         for _ in 0..(128 * 50) {
             channel.step(128);
+            channel.tick_sweep();
         }
         assert!(
             channel.sweep_enable,
@@ -1210,6 +1222,7 @@ mod tests {
         let start_vol = channel.current_volume;
         for _ in 0..(256 * 10) {
             channel.step(256);
+            channel.tick_envelope();
         }
         assert!(
             channel.current_volume <= start_vol,
@@ -1230,6 +1243,7 @@ mod tests {
         let start_vol = channel.current_volume;
         for _ in 0..(256 * 10) {
             channel.step(256);
+            channel.tick_envelope();
         }
         assert!(
             channel.current_volume >= start_vol,
@@ -1247,6 +1261,7 @@ mod tests {
         channel.write_io(0xFF23, 0x80);
         for _ in 0..(256 * 500) {
             channel.step(256);
+            channel.tick_envelope();
         }
         assert_eq!(channel.current_volume, 0, "Volume should have reached 0");
     }
@@ -1272,6 +1287,7 @@ mod tests {
         let start_vol = channel.current_volume;
         for _ in 0..(256 * 100) {
             channel.step(256);
+            channel.tick_envelope();
         }
         assert_eq!(
             channel.current_volume, start_vol,
@@ -1329,8 +1345,8 @@ mod tests {
         assert!(channel.enabled);
         assert_eq!(channel.length_counter, 32);
         let start_counter = channel.length_counter;
-        for _ in 0..(256 * 5) {
-            channel.step(256);
+        for _ in 0..5 {
+            channel.tick_length();
         }
         assert!(
             channel.length_counter < start_counter,
@@ -1348,8 +1364,8 @@ mod tests {
         channel.write_io(0xFF13, 0x00);
         channel.write_io(0xFF14, 0xC0);
         assert!(channel.enabled);
-        for _ in 0..(256 * 300) {
-            channel.step(256);
+        for _ in 0..300 {
+            channel.tick_length();
         }
         assert!(
             !channel.enabled,
@@ -1367,8 +1383,8 @@ mod tests {
         assert!(channel.enabled);
         assert_eq!(channel.length_counter, 128);
         let start_counter = channel.length_counter;
-        for _ in 0..(256 * 5) {
-            channel.step(256);
+        for _ in 0..5 {
+            channel.tick_length();
         }
         assert!(
             channel.length_counter < start_counter,
@@ -1386,8 +1402,8 @@ mod tests {
         channel.write_io(0xFF1D, 0x00);
         channel.write_io(0xFF1E, 0xC0);
         assert!(channel.enabled);
-        for _ in 0..(256 * 300) {
-            channel.step(256);
+        for _ in 0..300 {
+            channel.tick_length();
         }
         assert!(
             !channel.enabled,
@@ -1405,8 +1421,8 @@ mod tests {
         assert!(channel.enabled);
         assert_eq!(channel.length_counter, 32);
         let start_counter = channel.length_counter;
-        for _ in 0..(256 * 5) {
-            channel.step(256);
+        for _ in 0..5 {
+            channel.tick_length();
         }
         assert!(
             channel.length_counter < start_counter,
@@ -1424,8 +1440,8 @@ mod tests {
         channel.write_io(0xFF22, 0x00);
         channel.write_io(0xFF23, 0xC0);
         assert!(channel.enabled);
-        for _ in 0..(256 * 300) {
-            channel.step(256);
+        for _ in 0..300 {
+            channel.tick_length();
         }
         assert!(
             !channel.enabled,
@@ -1444,8 +1460,8 @@ mod tests {
         assert!(channel.length_enable);
         channel.length_enable = false;
         let start_counter = channel.length_counter;
-        for _ in 0..(256 * 10) {
-            channel.step(256);
+        for _ in 0..10 {
+            channel.tick_length();
         }
         assert_eq!(
             channel.length_counter, start_counter,
