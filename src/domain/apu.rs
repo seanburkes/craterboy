@@ -17,6 +17,7 @@ const REG_NR44: u16 = 0xFF23;
 
 const FREQ_DIVISOR: u32 = 131072;
 const NOISE_CLOCK_BASE: u32 = 524288;
+const ENVELOPE_TICK_CYCLES: u32 = 256;
 
 #[derive(Debug)]
 pub struct WaveChannel {
@@ -183,6 +184,7 @@ pub struct NoiseChannel {
     divisor_code: u8,
     lfsr: u16,
     timer: u32,
+    envelope_timer: u32,
     envelope_counter: u8,
     current_volume: u8,
     output_volume: i32,
@@ -202,6 +204,7 @@ impl NoiseChannel {
             divisor_code: 0,
             lfsr: 0,
             timer: 0,
+            envelope_timer: 0,
             envelope_counter: 0,
             current_volume: 0,
             output_volume: 0,
@@ -228,6 +231,12 @@ impl NoiseChannel {
             return 0;
         }
 
+        self.envelope_timer = self.envelope_timer.wrapping_add(cycles);
+        while self.envelope_timer >= ENVELOPE_TICK_CYCLES {
+            self.envelope_timer -= ENVELOPE_TICK_CYCLES;
+            self.step_envelope();
+        }
+
         let divisor = Self::divisor_value(self.divisor_code);
         let shift = self.shift_clock_frequency;
         let threshold = (NOISE_CLOCK_BASE / (divisor << shift)) / 2;
@@ -246,6 +255,29 @@ impl NoiseChannel {
         };
 
         self.output_volume
+    }
+
+    fn step_envelope(&mut self) {
+        if self.envelope_period == 0 {
+            return;
+        }
+
+        if self.envelope_counter > 0 {
+            self.envelope_counter -= 1;
+            return;
+        }
+
+        self.envelope_counter = self.envelope_period;
+
+        if self.envelope_add {
+            if self.current_volume < 15 {
+                self.current_volume += 1;
+            }
+        } else {
+            if self.current_volume > 0 {
+                self.current_volume -= 1;
+            }
+        }
     }
 
     fn clock_lfsr(&mut self) {
@@ -272,6 +304,7 @@ impl NoiseChannel {
         self.divisor_code = 0;
         self.lfsr = 0;
         self.timer = 0;
+        self.envelope_timer = 0;
         self.envelope_counter = 0;
         self.current_volume = 0;
         self.output_volume = 0;
@@ -331,6 +364,7 @@ impl NoiseChannel {
         self.enabled = true;
         self.lfsr = 0x7FFF;
         self.timer = 0;
+        self.envelope_timer = 0;
         self.current_volume = self.volume;
         self.envelope_counter = self.envelope_period;
     }
@@ -624,6 +658,95 @@ mod tests {
         channel.step(100000);
         let lfsr = channel.lfsr;
         assert!(lfsr & 0xFF80 == 0, "LFSR should be 7-bit: {:016b}", lfsr);
+    }
+
+    #[test]
+    fn noise_channel_envelope_initializes_on_trigger() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF21, 0x90);
+        channel.write_io(0xFF22, 0x00);
+        channel.write_io(0xFF23, 0x80);
+        assert_eq!(channel.current_volume, 0x09);
+        assert_eq!(channel.envelope_counter, 0x00);
+    }
+
+    #[test]
+    fn noise_channel_envelope_decrements_volume() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF21, 0x80);
+        channel.write_io(0xFF22, 0x00);
+        channel.write_io(0xFF23, 0x80);
+        assert_eq!(channel.current_volume, 0x08);
+        let start_vol = channel.current_volume;
+        for _ in 0..(256 * 10) {
+            channel.step(256);
+        }
+        assert!(
+            channel.current_volume <= start_vol,
+            "Volume should decrease: started at {}, now {}",
+            start_vol,
+            channel.current_volume
+        );
+    }
+
+    #[test]
+    fn noise_channel_envelope_increments_volume() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF21, 0x98);
+        channel.write_io(0xFF22, 0x00);
+        channel.write_io(0xFF23, 0x80);
+        assert_eq!(channel.current_volume, 0x09);
+        assert!(channel.envelope_add);
+        let start_vol = channel.current_volume;
+        for _ in 0..(256 * 10) {
+            channel.step(256);
+        }
+        assert!(
+            channel.current_volume >= start_vol,
+            "Volume should increase: started at {}, now {}",
+            start_vol,
+            channel.current_volume
+        );
+    }
+
+    #[test]
+    fn noise_channel_envelope_stops_at_zero() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF21, 0x87);
+        channel.write_io(0xFF22, 0x00);
+        channel.write_io(0xFF23, 0x80);
+        for _ in 0..(256 * 500) {
+            channel.step(256);
+        }
+        assert_eq!(channel.current_volume, 0, "Volume should have reached 0");
+    }
+
+    #[test]
+    fn noise_channel_envelope_stops_at_fifteen() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF21, 0xF8);
+        channel.write_io(0xFF22, 0x00);
+        channel.write_io(0xFF23, 0x80);
+        for _ in 0..(256 * 500) {
+            channel.step(256);
+        }
+        assert_eq!(channel.current_volume, 15, "Volume should have reached 15");
+    }
+
+    #[test]
+    fn noise_channel_envelope_zero_period_means_no_sweep() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF21, 0x80);
+        channel.write_io(0xFF22, 0x00);
+        channel.write_io(0xFF23, 0x80);
+        let start_vol = channel.current_volume;
+        for _ in 0..(256 * 100) {
+            channel.step(256);
+        }
+        assert_eq!(
+            channel.current_volume, start_vol,
+            "Volume should not change with period 0"
+        );
     }
 
     #[test]
