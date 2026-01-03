@@ -1101,7 +1101,11 @@ impl Cpu {
                     _ => self.srl(value),
                 };
                 self.write_reg8(reg, next, bus);
-                if is_hl { 16 } else { 8 }
+                if is_hl {
+                    16
+                } else {
+                    8
+                }
             }
             1 => {
                 let value = self.read_reg8(reg, bus);
@@ -1110,19 +1114,31 @@ impl Cpu {
                 self.regs.set_flag_z(zero);
                 self.regs.set_flag_n(false);
                 self.regs.set_flag_h(true);
-                if is_hl { 12 } else { 8 }
+                if is_hl {
+                    12
+                } else {
+                    8
+                }
             }
             2 => {
                 let value = self.read_reg8(reg, bus);
                 let next = value & !(1u8 << bit);
                 self.write_reg8(reg, next, bus);
-                if is_hl { 16 } else { 8 }
+                if is_hl {
+                    16
+                } else {
+                    8
+                }
             }
             _ => {
                 let value = self.read_reg8(reg, bus);
                 let next = value | (1u8 << bit);
                 self.write_reg8(reg, next, bus);
-                if is_hl { 16 } else { 8 }
+                if is_hl {
+                    16
+                } else {
+                    8
+                }
             }
         }
     }
@@ -1297,10 +1313,10 @@ impl Cpu {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cpu, REG_IE, REG_IF, Registers};
+    use super::{Cpu, Registers, REG_IE, REG_IF};
+    use crate::domain::cartridge::ROM_BANK_SIZE;
     use crate::domain::Bus;
     use crate::domain::Cartridge;
-    use crate::domain::cartridge::ROM_BANK_SIZE;
 
     fn bus_with_rom(mut rom: Vec<u8>) -> Bus {
         if rom.len() < 0x0150 {
@@ -1895,6 +1911,7 @@ mod tests {
         rom[0x0001] = 0x00;
         rom[0x0002] = 0x3E;
         rom[0x0003] = 0x55;
+        rom[0x0143] = 0x80; // CGB supported
         let mut bus = bus_with_rom(rom);
         let mut cpu = Cpu::new();
         bus.write8(REG_KEY1, 0x01);
