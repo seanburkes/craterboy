@@ -20,7 +20,7 @@ use crate::infrastructure::rom_loader::RomLoadError;
 use crate::interface::audio::AudioOutput;
 
 #[cfg(feature = "gamepad")]
-use gilrs::{Axis, Button, Gamepad, GamepadId, Gilrs};
+use gilrs::{Gamepad, Gilrs};
 
 const FRAME_WIDTH_U32: u32 = FRAME_WIDTH as u32;
 const FRAME_HEIGHT_U32: u32 = FRAME_HEIGHT as u32;
@@ -461,7 +461,7 @@ impl State {
         let mut audio = AudioOutput::new();
 
         #[cfg(feature = "audio")]
-        audio.start(&mut emulator);
+        audio.start(emulator.apu_sample_rate_hz());
 
         #[cfg(feature = "gamepad")]
         let gilrs = Gilrs::new().ok();
@@ -504,13 +504,15 @@ impl State {
         // Poll gamepad input
         #[cfg(feature = "gamepad")]
         if let Some(ref gilrs) = self.gilrs {
-            if let Some((id, gamepad)) = gilrs.gamepads().next() {
+            if let Some((_id, gamepad)) = gilrs.gamepads().next() {
                 self.input.handle_gamepad(&gamepad, 0.15);
             }
         }
 
         self.input.apply(&mut self.emulator);
         let _ = self.emulator.step_frame();
+        #[cfg(feature = "audio")]
+        self.audio.enqueue_emulator_samples(&mut self.emulator);
         if self.emulator.has_bus() {
             return;
         }

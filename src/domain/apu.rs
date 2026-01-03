@@ -1,12 +1,21 @@
-use super::Bus;
+use std::collections::VecDeque;
 
+const CPU_HZ: f64 = 4_194_304.0;
 const FRAME_CYCLES: u32 = 70_224;
+pub(crate) const OUTPUT_SAMPLE_RATE_HZ: f64 = 48_000.0;
+const CYCLES_PER_SAMPLE: f64 = CPU_HZ / OUTPUT_SAMPLE_RATE_HZ;
+const MAX_SAMPLE_QUEUE: usize = 8_192;
 
 const REG_NR10: u16 = 0xFF10;
 const REG_NR11: u16 = 0xFF11;
 const REG_NR12: u16 = 0xFF12;
 const REG_NR13: u16 = 0xFF13;
 const REG_NR14: u16 = 0xFF14;
+
+const REG_NR21: u16 = 0xFF16;
+const REG_NR22: u16 = 0xFF17;
+const REG_NR23: u16 = 0xFF18;
+const REG_NR24: u16 = 0xFF19;
 
 const REG_NR30: u16 = 0xFF1A;
 const REG_NR31: u16 = 0xFF1B;
@@ -39,6 +48,7 @@ const DUTY_CYCLES: [[u8; 8]; 4] = [
 #[derive(Debug)]
 pub struct PulseChannel {
     enabled: bool,
+    has_sweep: bool,
     length: u8,
     length_counter: u8,
     duty_cycle: u8,
@@ -61,8 +71,17 @@ pub struct PulseChannel {
 
 impl PulseChannel {
     pub fn new() -> Self {
+        Self::new_with_sweep(true)
+    }
+
+    pub fn new_no_sweep() -> Self {
+        Self::new_with_sweep(false)
+    }
+
+    fn new_with_sweep(has_sweep: bool) -> Self {
         Self {
             enabled: false,
+            has_sweep,
             length: 0,
             length_counter: 0,
             duty_cycle: 0,
@@ -85,6 +104,10 @@ impl PulseChannel {
     }
 
     pub fn tick_sweep(&mut self) {
+        if !self.has_sweep {
+            return;
+        }
+
         if !self.sweep_enable {
             return;
         }
@@ -208,6 +231,53 @@ impl PulseChannel {
         self.output_volume = 0;
     }
 
+    fn read_duty_length(&self) -> u8 {
+        (self.duty_cycle << 6) | (self.length & 0x3F)
+    }
+
+    fn read_envelope(&self) -> u8 {
+        (self.volume << 4)
+            | (if self.envelope_add { 0x08 } else { 0 })
+            | (self.envelope_period & 0x07)
+    }
+
+    fn read_frequency_low(&self) -> u8 {
+        self.frequency as u8
+    }
+
+    fn read_frequency_high(&self) -> u8 {
+        let mut value = 0;
+        if self.length_enable {
+            value |= 0x40;
+        }
+        value | ((self.frequency >> 8) as u8) & 0x07
+    }
+
+    fn write_duty_length(&mut self, value: u8) {
+        self.duty_cycle = (value >> 6) & 0x03;
+        self.length = value & 0x3F;
+    }
+
+    fn write_envelope(&mut self, value: u8) {
+        self.volume = (value >> 4) & 0x0F;
+        self.envelope_add = value & 0x08 != 0;
+        self.envelope_period = value & 0x07;
+        self.current_volume = self.volume;
+    }
+
+    fn write_frequency_low(&mut self, value: u8) {
+        self.frequency = (self.frequency & 0xFF00) | (value as u16);
+    }
+
+    fn write_frequency_high(&mut self, value: u8) {
+        self.length_enable = value & 0x40 != 0;
+        let new_freq_high = (value as u16) & 0x07;
+        self.frequency = (self.frequency & 0x00FF) | (new_freq_high << 8);
+        if value & 0x80 != 0 {
+            self.trigger();
+        }
+    }
+
     pub fn read_io(&self, addr: u16) -> u8 {
         match addr {
             REG_NR10 => {
@@ -220,20 +290,10 @@ impl PulseChannel {
                 }
                 value | (self.sweep_shift & 0x07)
             }
-            REG_NR11 => (self.duty_cycle << 6) | (self.length & 0x3F),
-            REG_NR12 => {
-                (self.volume << 4)
-                    | (if self.envelope_add { 0x08 } else { 0 })
-                    | (self.envelope_period & 0x07)
-            }
-            REG_NR13 => self.frequency as u8,
-            REG_NR14 => {
-                let mut value = 0;
-                if self.length_enable {
-                    value |= 0x40;
-                }
-                value | ((self.frequency >> 8) as u8) & 0x07
-            }
+            REG_NR11 => self.read_duty_length(),
+            REG_NR12 => self.read_envelope(),
+            REG_NR13 => self.read_frequency_low(),
+            REG_NR14 => self.read_frequency_high(),
             _ => 0,
         }
     }
@@ -241,32 +301,18 @@ impl PulseChannel {
     pub fn write_io(&mut self, addr: u16, value: u8) {
         match addr {
             REG_NR10 => {
+                if !self.has_sweep {
+                    return;
+                }
                 self.sweep_enable = value & 0x80 != 0;
                 self.sweep_period = (value >> 4) & 0x07;
                 self.sweep_add = value & 0x08 != 0;
                 self.sweep_shift = value & 0x07;
             }
-            REG_NR11 => {
-                self.duty_cycle = (value >> 6) & 0x03;
-                self.length = value & 0x3F;
-            }
-            REG_NR12 => {
-                self.volume = (value >> 4) & 0x0F;
-                self.envelope_add = value & 0x08 != 0;
-                self.envelope_period = value & 0x07;
-                self.current_volume = self.volume;
-            }
-            REG_NR13 => {
-                self.frequency = (self.frequency & 0xFF00) | (value as u16);
-            }
-            REG_NR14 => {
-                self.length_enable = value & 0x40 != 0;
-                let new_freq_high = (value as u16) & 0x07;
-                self.frequency = (self.frequency & 0x00FF) | (new_freq_high << 8);
-                if value & 0x80 != 0 {
-                    self.trigger();
-                }
-            }
+            REG_NR11 => self.write_duty_length(value),
+            REG_NR12 => self.write_envelope(value),
+            REG_NR13 => self.write_frequency_low(value),
+            REG_NR14 => self.write_frequency_high(value),
             _ => {}
         }
     }
@@ -680,33 +726,37 @@ impl NoiseChannel {
 
 #[derive(Debug)]
 pub struct Apu {
-    frame_cycles: u32,
     frame_sequencer_cycles: u32,
     frame_sequencer_step: u8,
     pulse_channel: PulseChannel,
+    pulse_channel2: PulseChannel,
     wave_channel: WaveChannel,
     noise_channel: NoiseChannel,
-    sample_ready: bool,
+    sample_cycle_accumulator: f64,
+    samples: VecDeque<i32>,
     current_sample: i32,
     master_volume_left: u8,
     master_volume_right: u8,
+    nr51: u8,
     sound_enabled: bool,
 }
 
 impl Apu {
     pub fn new() -> Self {
         Self {
-            frame_cycles: FRAME_CYCLES,
             frame_sequencer_cycles: 0,
             frame_sequencer_step: 0,
             pulse_channel: PulseChannel::new(),
+            pulse_channel2: PulseChannel::new_no_sweep(),
             wave_channel: WaveChannel::new(),
             noise_channel: NoiseChannel::new(),
-            sample_ready: false,
+            sample_cycle_accumulator: 0.0,
+            samples: VecDeque::new(),
             current_sample: 0,
-            master_volume_left: 7,
-            master_volume_right: 7,
-            sound_enabled: true,
+            master_volume_left: 0,
+            master_volume_right: 0,
+            nr51: 0,
+            sound_enabled: false,
         }
     }
 
@@ -717,15 +767,19 @@ impl Apu {
             self.step_frame_sequencer();
         }
 
-        self.frame_cycles = self.frame_cycles.wrapping_add(cycles);
         self.pulse_channel.step(cycles);
+        self.pulse_channel2.step(cycles);
         self.wave_channel.step(cycles);
         self.noise_channel.step(cycles);
 
-        if self.frame_cycles >= FRAME_CYCLES {
-            self.frame_cycles -= FRAME_CYCLES;
+        self.sample_cycle_accumulator += cycles as f64;
+        while self.sample_cycle_accumulator >= CYCLES_PER_SAMPLE {
+            self.sample_cycle_accumulator -= CYCLES_PER_SAMPLE;
             self.mix_sample();
-            self.sample_ready = true;
+            if self.samples.len() >= MAX_SAMPLE_QUEUE {
+                self.samples.pop_front();
+            }
+            self.samples.push_back(self.current_sample);
         }
 
         Ok(())
@@ -735,45 +789,55 @@ impl Apu {
         match self.frame_sequencer_step {
             0 => {
                 self.pulse_channel.tick_length();
+                self.pulse_channel2.tick_length();
                 self.wave_channel.tick_length();
                 self.noise_channel.tick_length();
             }
             1 => {
                 self.pulse_channel.tick_sweep();
                 self.pulse_channel.tick_length();
+                self.pulse_channel2.tick_length();
                 self.wave_channel.tick_length();
                 self.noise_channel.tick_length();
             }
             2 => {
                 self.pulse_channel.tick_length();
+                self.pulse_channel2.tick_length();
                 self.wave_channel.tick_length();
                 self.noise_channel.tick_length();
             }
             3 => {
                 self.pulse_channel.tick_envelope();
+                self.pulse_channel2.tick_envelope();
                 self.pulse_channel.tick_length();
+                self.pulse_channel2.tick_length();
                 self.wave_channel.tick_length();
                 self.noise_channel.tick_length();
             }
             4 => {
                 self.pulse_channel.tick_length();
+                self.pulse_channel2.tick_length();
                 self.wave_channel.tick_length();
                 self.noise_channel.tick_length();
             }
             5 => {
                 self.pulse_channel.tick_sweep();
                 self.pulse_channel.tick_length();
+                self.pulse_channel2.tick_length();
                 self.wave_channel.tick_length();
                 self.noise_channel.tick_length();
             }
             6 => {
                 self.pulse_channel.tick_length();
+                self.pulse_channel2.tick_length();
                 self.wave_channel.tick_length();
                 self.noise_channel.tick_length();
             }
             7 => {
                 self.pulse_channel.tick_envelope();
+                self.pulse_channel2.tick_envelope();
                 self.pulse_channel.tick_length();
+                self.pulse_channel2.tick_length();
                 self.wave_channel.tick_length();
                 self.noise_channel.tick_length();
             }
@@ -789,31 +853,119 @@ impl Apu {
             return;
         }
 
-        let pulse_out = self.pulse_channel.output();
+        let pulse1_out = self.pulse_channel.output();
+        let pulse2_out = self.pulse_channel2.output();
         let wave_out = self.wave_channel.output();
         let noise_out = self.noise_channel.output();
 
-        let mixed = (pulse_out + wave_out + noise_out) as i32;
-        let volume_factor = ((self.master_volume_left + self.master_volume_right) as i32 + 2) / 16;
-        self.current_sample = (mixed * volume_factor).clamp(-128, 127);
+        let mut left = 0;
+        let mut right = 0;
+
+        if self.nr51 & 0x10 != 0 {
+            left += pulse1_out;
+        }
+        if self.nr51 & 0x20 != 0 {
+            left += pulse2_out;
+        }
+        if self.nr51 & 0x40 != 0 {
+            left += wave_out;
+        }
+        if self.nr51 & 0x80 != 0 {
+            left += noise_out;
+        }
+
+        if self.nr51 & 0x01 != 0 {
+            right += pulse1_out;
+        }
+        if self.nr51 & 0x02 != 0 {
+            right += pulse2_out;
+        }
+        if self.nr51 & 0x04 != 0 {
+            right += wave_out;
+        }
+        if self.nr51 & 0x08 != 0 {
+            right += noise_out;
+        }
+
+        let left_scaled = left * (self.master_volume_left as i32 + 1);
+        let right_scaled = right * (self.master_volume_right as i32 + 1);
+        let mixed = (left_scaled + right_scaled) / 2;
+        self.current_sample = (mixed / 8).clamp(-128, 127);
     }
 
     pub fn samples_per_frame(&self) -> u32 {
-        self.frame_cycles
+        let frame_rate = CPU_HZ / FRAME_CYCLES as f64;
+        (OUTPUT_SAMPLE_RATE_HZ / frame_rate).round() as u32
     }
 
-    pub fn reset(&mut self) {
-        self.frame_cycles = FRAME_CYCLES;
+    fn reset_state(&mut self) {
         self.frame_sequencer_cycles = 0;
         self.frame_sequencer_step = 0;
         self.pulse_channel.reset();
+        self.pulse_channel2.reset();
         self.wave_channel.reset();
         self.noise_channel.reset();
-        self.sample_ready = false;
+        self.sample_cycle_accumulator = 0.0;
+        self.samples.clear();
         self.current_sample = 0;
+        self.master_volume_left = 0;
+        self.master_volume_right = 0;
+        self.nr51 = 0;
+    }
+
+    pub fn reset(&mut self) {
+        self.reset_state();
+        self.sound_enabled = false;
+    }
+
+    pub fn apply_post_boot_state(&mut self) {
+        self.reset_state();
+        self.sound_enabled = true;
         self.master_volume_left = 7;
         self.master_volume_right = 7;
-        self.sound_enabled = true;
+        self.nr51 = 0xF3;
+
+        self.pulse_channel.sweep_enable = true;
+        self.pulse_channel.sweep_period = 0;
+        self.pulse_channel.sweep_add = false;
+        self.pulse_channel.sweep_shift = 0;
+        self.pulse_channel.duty_cycle = 2;
+        self.pulse_channel.length = 0x3F;
+        self.pulse_channel.volume = 0x0F;
+        self.pulse_channel.envelope_add = true;
+        self.pulse_channel.envelope_period = 0x03;
+        self.pulse_channel.current_volume = self.pulse_channel.volume;
+        self.pulse_channel.frequency = 0x700;
+        self.pulse_channel.length_enable = false;
+        self.pulse_channel.enabled = false;
+
+        self.pulse_channel2.duty_cycle = 0;
+        self.pulse_channel2.length = 0x3F;
+        self.pulse_channel2.volume = 0x00;
+        self.pulse_channel2.envelope_add = false;
+        self.pulse_channel2.envelope_period = 0x00;
+        self.pulse_channel2.current_volume = 0x00;
+        self.pulse_channel2.frequency = 0x700;
+        self.pulse_channel2.length_enable = false;
+        self.pulse_channel2.enabled = false;
+
+        self.wave_channel.enabled = false;
+        self.wave_channel.length = 0xFF;
+        self.wave_channel.volume_code = 0x00;
+        self.wave_channel.frequency = 0x700;
+        self.wave_channel.length_enable = false;
+        self.wave_channel.wave_ram = [0xFF; WAVE_RAM_SIZE];
+
+        self.noise_channel.length = 0x3F;
+        self.noise_channel.volume = 0x00;
+        self.noise_channel.envelope_add = false;
+        self.noise_channel.envelope_period = 0x00;
+        self.noise_channel.shift_clock_frequency = 0x00;
+        self.noise_channel.seven_bit_mode = false;
+        self.noise_channel.divisor_code = 0x00;
+        self.noise_channel.length_enable = false;
+        self.noise_channel.current_volume = 0x00;
+        self.noise_channel.enabled = false;
     }
 
     pub fn read_io(&self, addr: u16) -> u8 {
@@ -821,16 +973,25 @@ impl Apu {
             REG_NR10 | REG_NR11 | REG_NR12 | REG_NR13 | REG_NR14 => {
                 self.pulse_channel.read_io(addr)
             }
+            REG_NR21 => self.pulse_channel2.read_duty_length(),
+            REG_NR22 => self.pulse_channel2.read_envelope(),
+            REG_NR23 => self.pulse_channel2.read_frequency_low(),
+            REG_NR24 => self.pulse_channel2.read_frequency_high(),
             REG_NR30 | REG_NR31 | REG_NR32 | REG_NR33 | REG_NR34 => self.wave_channel.read_io(addr),
             REG_NR41 | REG_NR42 | REG_NR43 | REG_NR44 => self.noise_channel.read_io(addr),
             REG_NR50 => ((self.master_volume_left & 0x07) << 4) | (self.master_volume_right & 0x07),
+            REG_NR51 => self.nr51,
             REG_NR52 => {
                 let mut value = if self.sound_enabled { 0x80 } else { 0x00 };
+                value |= 0x70;
                 if self.pulse_channel.enabled {
                     value |= 0x01;
                 }
-                if self.wave_channel.enabled {
+                if self.pulse_channel2.enabled {
                     value |= 0x02;
+                }
+                if self.wave_channel.enabled {
+                    value |= 0x04;
                 }
                 if self.noise_channel.enabled {
                     value |= 0x08;
@@ -849,6 +1010,26 @@ impl Apu {
                     self.pulse_channel.write_io(addr, value);
                 }
             }
+            REG_NR21 => {
+                if self.sound_enabled {
+                    self.pulse_channel2.write_duty_length(value);
+                }
+            }
+            REG_NR22 => {
+                if self.sound_enabled {
+                    self.pulse_channel2.write_envelope(value);
+                }
+            }
+            REG_NR23 => {
+                if self.sound_enabled {
+                    self.pulse_channel2.write_frequency_low(value);
+                }
+            }
+            REG_NR24 => {
+                if self.sound_enabled {
+                    self.pulse_channel2.write_frequency_high(value);
+                }
+            }
             REG_NR30 | REG_NR31 | REG_NR32 | REG_NR33 | REG_NR34 => {
                 if self.sound_enabled {
                     self.wave_channel.write_io(addr, value);
@@ -860,16 +1041,24 @@ impl Apu {
                 }
             }
             REG_NR50 => {
-                self.master_volume_left = (value >> 4) & 0x07;
-                self.master_volume_right = value & 0x07;
+                if self.sound_enabled {
+                    self.master_volume_left = (value >> 4) & 0x07;
+                    self.master_volume_right = value & 0x07;
+                }
+            }
+            REG_NR51 => {
+                if self.sound_enabled {
+                    self.nr51 = value;
+                }
             }
             REG_NR52 => {
                 let was_enabled = self.sound_enabled;
-                self.sound_enabled = value & 0x80 != 0;
-                if was_enabled && !self.sound_enabled {
-                    self.pulse_channel.reset();
-                    self.wave_channel.reset();
-                    self.noise_channel.reset();
+                let now_enabled = value & 0x80 != 0;
+                if was_enabled && !now_enabled {
+                    self.reset();
+                } else if !was_enabled && now_enabled {
+                    self.reset_state();
+                    self.sound_enabled = true;
                 }
             }
             WAVE_RAM_START..=0xFF3F => {
@@ -883,6 +1072,10 @@ impl Apu {
         self.pulse_channel.output()
     }
 
+    pub fn pulse2_output(&self) -> i32 {
+        self.pulse_channel2.output()
+    }
+
     pub fn wave_output(&self) -> i32 {
         self.wave_channel.output()
     }
@@ -892,16 +1085,15 @@ impl Apu {
     }
 
     pub fn sample_rate_hz(&self) -> f64 {
-        4_194_304.0 / FRAME_CYCLES as f64
+        OUTPUT_SAMPLE_RATE_HZ
     }
 
     pub fn has_sample(&self) -> bool {
-        self.sample_ready
+        !self.samples.is_empty()
     }
 
     pub fn take_sample(&mut self) -> i32 {
-        self.sample_ready = false;
-        self.current_sample
+        self.samples.pop_front().unwrap_or(0)
     }
 
     pub fn sample(&self) -> i32 {
@@ -911,23 +1103,29 @@ impl Apu {
 
 #[cfg(test)]
 mod tests {
-    use super::{Apu, FRAME_CYCLES, NoiseChannel, PulseChannel, WaveChannel};
+    use super::{
+        Apu, CPU_HZ, CYCLES_PER_SAMPLE, FRAME_CYCLES, NoiseChannel, OUTPUT_SAMPLE_RATE_HZ,
+        PulseChannel, WaveChannel,
+    };
 
     #[test]
     fn new_apu_initializes_correctly() {
         let apu = Apu::new();
-        assert_eq!(apu.samples_per_frame(), FRAME_CYCLES);
+        let frame_rate = CPU_HZ / FRAME_CYCLES as f64;
+        let expected = (apu.sample_rate_hz() / frame_rate).round() as u32;
+        assert_eq!(apu.samples_per_frame(), expected);
     }
 
     #[test]
     fn apu_mixes_pulse_wave_and_noise_channels() {
         let mut apu = Apu::new();
+        apu.apply_post_boot_state();
         apu.write_io(0xFF12, 0x80);
         apu.write_io(0xFF14, 0x80);
         apu.write_io(0xFF22, 0x00);
         apu.write_io(0xFF23, 0x80);
         for _ in 0..10 {
-            apu.step(FRAME_CYCLES as u32);
+            let _ = apu.step(FRAME_CYCLES as u32);
             while apu.has_sample() {
                 let _ = apu.take_sample();
             }
@@ -1345,22 +1543,23 @@ mod tests {
     }
 
     #[test]
-    fn apu_sample_rate_is_59_7275hz() {
+    fn apu_sample_rate_is_48khz() {
         let apu = Apu::new();
         let rate = apu.sample_rate_hz();
         assert!(
-            (rate - 59.7275).abs() < 0.001,
-            "Sample rate should be ~59.7275 Hz, got {}",
+            (rate - OUTPUT_SAMPLE_RATE_HZ).abs() < 0.1,
+            "Sample rate should be ~48kHz, got {}",
             rate
         );
     }
 
     #[test]
-    fn apu_sample_generated_at_frame_boundary() {
+    fn apu_sample_generated_at_sample_boundary() {
         let mut apu = Apu::new();
         assert!(!apu.has_sample());
         assert_eq!(apu.sample(), 0);
-        let _ = apu.step(FRAME_CYCLES as u32);
+        let cycles_per_sample = CYCLES_PER_SAMPLE.ceil() as u32;
+        let _ = apu.step(cycles_per_sample);
         assert!(apu.has_sample());
         let sample = apu.take_sample();
         assert!(sample >= -128 && sample <= 127);
@@ -1370,8 +1569,9 @@ mod tests {
     #[test]
     fn apu_sample_is_clamped() {
         let mut apu = Apu::new();
+        let cycles_per_sample = CYCLES_PER_SAMPLE.ceil() as u32;
         for _ in 0..10 {
-            let _ = apu.step(FRAME_CYCLES as u32);
+            let _ = apu.step(cycles_per_sample);
             if apu.has_sample() {
                 let sample = apu.sample();
                 assert!(

@@ -1,4 +1,4 @@
-use super::{Cartridge, Mbc, MbcError, RtcMode};
+use super::{Apu, Cartridge, Mbc, MbcError, RtcMode};
 
 const BOOT_ROM_SIZE: usize = 0x100;
 const VRAM_SIZE: usize = 0x2000;
@@ -88,6 +88,7 @@ pub struct Bus {
     speed_switch_pending: bool,
     interrupt_flag: u8,
     interrupt_enable: u8,
+    apu: Apu,
 }
 
 impl Bus {
@@ -148,6 +149,11 @@ impl Bus {
             stat = 0x85;
         }
 
+        let mut apu = Apu::new();
+        if !boot_rom_enabled {
+            apu.apply_post_boot_state();
+        }
+
         Ok(Self {
             cartridge,
             mbc,
@@ -181,6 +187,7 @@ impl Bus {
             speed_switch_pending: false,
             interrupt_flag,
             interrupt_enable: 0,
+            apu,
         })
     }
 
@@ -273,6 +280,7 @@ impl Bus {
     pub fn step(&mut self, cycles: u32) {
         self.step_div(cycles);
         self.step_timer(cycles);
+        let _ = self.apu.step(cycles);
         self.step_ppu(cycles);
         self.step_dma(cycles);
         self.mbc.tick(cycles);
@@ -280,6 +288,54 @@ impl Bus {
 
     pub fn set_rtc_mode(&mut self, mode: RtcMode) {
         self.mbc.set_rtc_mode(mode);
+    }
+
+    pub fn apu_step(&mut self, cycles: u32) {
+        let _ = self.apu.step(cycles);
+    }
+
+    pub fn apu_sample_rate_hz(&self) -> f64 {
+        self.apu.sample_rate_hz()
+    }
+
+    pub fn apu_has_sample(&self) -> bool {
+        self.apu.has_sample()
+    }
+
+    pub fn apu_take_sample(&mut self) -> i32 {
+        self.apu.take_sample()
+    }
+
+    pub fn apu_sample(&self) -> i32 {
+        self.apu.sample()
+    }
+
+    pub fn apu_pulse_output(&self) -> i32 {
+        self.apu.pulse_output()
+    }
+
+    pub fn apu_pulse2_output(&self) -> i32 {
+        self.apu.pulse2_output()
+    }
+
+    pub fn apu_wave_output(&self) -> i32 {
+        self.apu.wave_output()
+    }
+
+    pub fn apu_noise_output(&self) -> i32 {
+        self.apu.noise_output()
+    }
+
+    pub fn apu_read_io(&self, addr: u16) -> u8 {
+        self.apu.read_io(addr)
+    }
+
+    pub fn apu_write_io(&mut self, addr: u16, value: u8) {
+        self.apu.write_io(addr, value);
+    }
+
+    pub fn apu_reset(&mut self) {
+        self.apu.reset();
     }
 
     pub fn apply_post_boot_state(&mut self) {
@@ -317,6 +373,8 @@ impl Bus {
         self.set_io_reg(REG_NR51, 0xF3);
         self.set_io_reg(REG_NR52, 0xF1);
 
+        self.apu.apply_post_boot_state();
+
         self.set_io_reg(REG_LCDC, 0x91);
         self.set_io_reg(REG_SCY, 0x00);
         self.set_io_reg(REG_SCX, 0x00);
@@ -351,6 +409,12 @@ impl Bus {
             REG_LYC => self.lyc,
             REG_DMA => self.dma,
             REG_KEY1 => self.read_key1(),
+            0xFF10..=0xFF14
+            | 0xFF16..=0xFF19
+            | 0xFF1A..=0xFF1E
+            | 0xFF20..=0xFF23
+            | 0xFF24..=0xFF26
+            | 0xFF30..=0xFF3F => self.apu.read_io(addr),
             _ => self.io[(addr as usize - 0xFF00) % IO_SIZE],
         }
     }
@@ -384,6 +448,14 @@ impl Bus {
             }
             REG_KEY1 => {
                 self.speed_switch_pending = value & 0x01 != 0;
+            }
+            0xFF10..=0xFF14
+            | 0xFF16..=0xFF19
+            | 0xFF1A..=0xFF1E
+            | 0xFF20..=0xFF23
+            | 0xFF24..=0xFF26
+            | 0xFF30..=0xFF3F => {
+                self.apu.write_io(addr, value);
             }
             _ => self.io[(addr as usize - 0xFF00) % IO_SIZE] = value,
         }
