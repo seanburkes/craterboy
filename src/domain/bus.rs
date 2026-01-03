@@ -51,6 +51,7 @@ const REG_WY: u16 = 0xFF4A;
 const REG_WX: u16 = 0xFF4B;
 const REG_KEY0: u16 = 0xFF4C;
 const REG_KEY1: u16 = 0xFF4D;
+const REG_VBK: u16 = 0xFF4F;
 const REG_BGPI: u16 = 0xFF68;
 const REG_BGPD: u16 = 0xFF69;
 const REG_OBPI: u16 = 0xFF6A;
@@ -66,7 +67,8 @@ pub struct Bus {
     boot_rom: Option<Vec<u8>>,
     boot_rom_enabled: bool,
     boot_rom_just_disabled: bool,
-    vram: Vec<u8>,
+    vram_bank: u8,
+    vram: [Vec<u8>; 2],
     wram: Vec<u8>,
     oam: Vec<u8>,
     io: Vec<u8>,
@@ -173,7 +175,8 @@ impl Bus {
             boot_rom,
             boot_rom_enabled,
             boot_rom_just_disabled: false,
-            vram: vec![0; VRAM_SIZE],
+            vram_bank: 0,
+            vram: [vec![0; VRAM_SIZE], vec![0; VRAM_SIZE]],
             wram: vec![0; WRAM_SIZE],
             oam: vec![0; OAM_SIZE],
             io,
@@ -228,7 +231,19 @@ impl Bus {
     }
 
     pub fn vram(&self) -> &[u8] {
-        &self.vram
+        &self.vram[self.vram_bank as usize]
+    }
+
+    pub fn vram_bank(&self) -> u8 {
+        self.vram_bank
+    }
+
+    pub fn vram_bank0(&self) -> &[u8] {
+        &self.vram[0]
+    }
+
+    pub fn vram_bank1(&self) -> &[u8] {
+        &self.vram[1]
     }
 
     pub fn bg_palette_data(&self) -> &[u8; 64] {
@@ -281,7 +296,9 @@ impl Bus {
 
         match addr {
             0x0000..=0x7FFF => self.mbc.read8(&self.cartridge, addr),
-            0x8000..=0x9FFF => self.vram[(addr as usize - 0x8000) % VRAM_SIZE],
+            0x8000..=0x9FFF => {
+                self.vram[self.vram_bank as usize][(addr as usize - 0x8000) % VRAM_SIZE]
+            }
             0xA000..=0xBFFF => self.mbc.read8(&self.cartridge, addr),
             0xC000..=0xDFFF => self.wram[(addr as usize - 0xC000) % WRAM_SIZE],
             0xE000..=0xFDFF => self.wram[(addr as usize - 0xE000) % WRAM_SIZE],
@@ -301,7 +318,9 @@ impl Bus {
 
         match addr {
             0x0000..=0x7FFF => self.mbc.write8(&mut self.cartridge, addr, value),
-            0x8000..=0x9FFF => self.vram[(addr as usize - 0x8000) % VRAM_SIZE] = value,
+            0x8000..=0x9FFF => {
+                self.vram[self.vram_bank as usize][(addr as usize - 0x8000) % VRAM_SIZE] = value
+            }
             0xA000..=0xBFFF => self.mbc.write8(&mut self.cartridge, addr, value),
             0xC000..=0xDFFF => self.wram[(addr as usize - 0xC000) % WRAM_SIZE] = value,
             0xE000..=0xFDFF => self.wram[(addr as usize - 0xE000) % WRAM_SIZE] = value,
@@ -456,6 +475,7 @@ impl Bus {
             REG_DMA => self.dma,
             REG_KEY0 => self.read_key0(),
             REG_KEY1 => self.read_key1(),
+            REG_VBK => self.vram_bank | 0xFE,
             REG_BGPI => self.read_bgpi(),
             REG_BGPD => self.read_bgpdata(),
             REG_OBPI => self.read_obpi(),
@@ -500,6 +520,9 @@ impl Bus {
             REG_KEY0 => {}
             REG_KEY1 => {
                 self.speed_switch_pending = value & 0x01 != 0;
+            }
+            REG_VBK => {
+                self.vram_bank = value & 0x01;
             }
             REG_BGPI => self.write_bgpi(value),
             REG_BGPD => self.write_bgpdata(value),
@@ -718,7 +741,8 @@ mod tests {
     use super::{
         BOOT_ROM_SIZE, Bus, DMA_CYCLES, IF_TIMER, REG_BGP, REG_BGPD, REG_BGPI, REG_DIV, REG_DMA,
         REG_IF, REG_JOYP, REG_KEY0, REG_KEY1, REG_LCDC, REG_LY, REG_LYC, REG_OBP0, REG_OBP1,
-        REG_OBPD, REG_OBPI, REG_SCX, REG_SCY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA, REG_WX, REG_WY,
+        REG_OBPD, REG_OBPI, REG_SCX, REG_SCY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA, REG_VBK,
+        REG_WX, REG_WY,
     };
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
@@ -1098,5 +1122,59 @@ mod tests {
 
         assert_eq!(bus.read8(REG_BGPD), 0x12);
         assert_eq!(bus.read8(REG_OBPD), 0x34);
+    }
+
+    #[test]
+    fn bus_cgb_vram_bank_switching() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(0x8000, 0x12);
+        assert_eq!(bus.read8(0x8000), 0x12);
+
+        bus.write8(REG_VBK, 0x01);
+        assert_eq!(bus.vram_bank(), 1);
+        assert_eq!(bus.read8(REG_VBK) & 0x01, 0x01);
+
+        assert_eq!(bus.read8(0x8000), 0x00);
+        bus.write8(0x8000, 0x34);
+        assert_eq!(bus.read8(0x8000), 0x34);
+
+        bus.write8(REG_VBK, 0x00);
+        assert_eq!(bus.vram_bank(), 0);
+        assert_eq!(bus.read8(0x8000), 0x12);
+
+        bus.write8(REG_VBK, 0x01);
+        assert_eq!(bus.read8(0x8000), 0x34);
+    }
+
+    #[test]
+    fn bus_cgb_vram_both_banks_accessible() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(0x8000, 0xAA);
+        bus.write8(REG_VBK, 0x01);
+        bus.write8(0x8000, 0xBB);
+
+        assert_eq!(bus.vram_bank0()[0], 0xAA);
+        assert_eq!(bus.vram_bank1()[0], 0xBB);
+    }
+
+    #[test]
+    fn bus_dmg_vram_still_works() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let bus = Bus::new(cartridge).expect("bus");
+
+        assert_eq!(bus.vram_bank(), 0);
+        assert_eq!(bus.read8(REG_VBK) & 0xFE, 0xFE);
     }
 }
