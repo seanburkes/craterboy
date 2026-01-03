@@ -25,6 +25,7 @@ const FREQ_DIVISOR: u32 = 131072;
 const NOISE_CLOCK_BASE: u32 = 524288;
 const ENVELOPE_TICK_CYCLES: u32 = 256;
 const SWEEP_TICK_CYCLES: u32 = 128;
+const LENGTH_TICK_CYCLES: u32 = 256;
 
 const DUTY_CYCLES: [[u8; 8]; 4] = [
     [0, 0, 0, 0, 0, 0, 0, 1],
@@ -37,6 +38,7 @@ const DUTY_CYCLES: [[u8; 8]; 4] = [
 pub struct PulseChannel {
     enabled: bool,
     length: u8,
+    length_counter: u8,
     duty_cycle: u8,
     volume: u8,
     envelope_add: bool,
@@ -51,6 +53,7 @@ pub struct PulseChannel {
     timer: u32,
     envelope_timer: u32,
     sweep_timer: u32,
+    length_timer: u32,
     position: u8,
     envelope_counter: u8,
     current_volume: u8,
@@ -62,6 +65,7 @@ impl PulseChannel {
         Self {
             enabled: false,
             length: 0,
+            length_counter: 0,
             duty_cycle: 0,
             volume: 0,
             envelope_add: false,
@@ -76,6 +80,7 @@ impl PulseChannel {
             timer: 0,
             envelope_timer: 0,
             sweep_timer: 0,
+            length_timer: 0,
             position: 0,
             envelope_counter: 0,
             current_volume: 0,
@@ -155,6 +160,12 @@ impl PulseChannel {
             self.step_envelope();
         }
 
+        self.length_timer = self.length_timer.wrapping_add(cycles);
+        while self.length_timer >= LENGTH_TICK_CYCLES {
+            self.length_timer -= LENGTH_TICK_CYCLES;
+            self.tick_length();
+        }
+
         let freq = self.frequency as u32;
         let divisor = 2048 - freq;
         let step_rate = FREQ_DIVISOR / divisor;
@@ -178,9 +189,23 @@ impl PulseChannel {
         self.output_volume
     }
 
+    fn tick_length(&mut self) {
+        if !self.length_enable {
+            return;
+        }
+
+        if self.length_counter > 0 {
+            self.length_counter -= 1;
+            if self.length_counter == 0 {
+                self.enabled = false;
+            }
+        }
+    }
+
     pub fn reset(&mut self) {
         self.enabled = false;
         self.length = 0;
+        self.length_counter = 0;
         self.duty_cycle = 0;
         self.volume = 0;
         self.envelope_add = false;
@@ -195,6 +220,7 @@ impl PulseChannel {
         self.timer = 0;
         self.envelope_timer = 0;
         self.sweep_timer = 0;
+        self.length_timer = 0;
         self.position = 0;
         self.envelope_counter = 0;
         self.current_volume = 0;
@@ -270,9 +296,11 @@ impl PulseChannel {
         self.timer = 0;
         self.envelope_timer = 0;
         self.sweep_timer = 0;
+        self.length_timer = 0;
         self.position = 0;
         self.current_volume = self.volume;
         self.envelope_counter = self.envelope_period;
+        self.length_counter = if self.length == 0 { 64 } else { self.length };
         self.sweep_counter = if self.sweep_period == 0 {
             8
         } else {
@@ -293,6 +321,7 @@ impl PulseChannel {
 pub struct WaveChannel {
     enabled: bool,
     length: u8,
+    length_counter: u16,
     volume_code: u8,
     frequency: u16,
     length_enable: bool,
@@ -300,6 +329,7 @@ pub struct WaveChannel {
     wave_ram: [u8; WAVE_RAM_SIZE],
     position: u8,
     timer: u32,
+    length_timer: u32,
     output_volume: i32,
 }
 
@@ -308,6 +338,7 @@ impl WaveChannel {
         Self {
             enabled: false,
             length: 0,
+            length_counter: 0,
             volume_code: 0,
             frequency: 0,
             length_enable: false,
@@ -315,11 +346,18 @@ impl WaveChannel {
             wave_ram: [0xFF; WAVE_RAM_SIZE],
             position: 0,
             timer: 0,
+            length_timer: 0,
             output_volume: 0,
         }
     }
 
     pub fn step(&mut self, cycles: u32) -> i32 {
+        self.length_timer = self.length_timer.wrapping_add(cycles);
+        while self.length_timer >= LENGTH_TICK_CYCLES {
+            self.length_timer -= LENGTH_TICK_CYCLES;
+            self.tick_length();
+        }
+
         if !self.enabled || self.frequency == 0 {
             self.output_volume = 0;
             return 0;
@@ -356,15 +394,30 @@ impl WaveChannel {
         self.output_volume
     }
 
+    fn tick_length(&mut self) {
+        if !self.length_enable {
+            return;
+        }
+
+        if self.length_counter > 0 {
+            self.length_counter -= 1;
+            if self.length_counter == 0 {
+                self.enabled = false;
+            }
+        }
+    }
+
     pub fn reset(&mut self) {
         self.enabled = false;
         self.length = 0;
+        self.length_counter = 0;
         self.volume_code = 0;
         self.frequency = 0;
         self.length_enable = false;
         self.trigger = false;
         self.position = 0;
         self.timer = 0;
+        self.length_timer = 0;
         self.output_volume = 0;
     }
 
@@ -414,6 +467,12 @@ impl WaveChannel {
                     self.enabled = true;
                     self.position = 0;
                     self.timer = 0;
+                    self.length_timer = 0;
+                    self.length_counter = if self.length == 0 {
+                        256
+                    } else {
+                        self.length as u16
+                    };
                 }
             }
             _ => {}
@@ -445,6 +504,7 @@ impl WaveChannel {
 pub struct NoiseChannel {
     enabled: bool,
     length: u8,
+    length_counter: u8,
     volume: u8,
     envelope_add: bool,
     envelope_period: u8,
@@ -458,6 +518,7 @@ pub struct NoiseChannel {
     envelope_counter: u8,
     current_volume: u8,
     output_volume: i32,
+    length_timer: u32,
 }
 
 impl NoiseChannel {
@@ -465,6 +526,7 @@ impl NoiseChannel {
         Self {
             enabled: false,
             length: 0,
+            length_counter: 0,
             volume: 0,
             envelope_add: false,
             envelope_period: 0,
@@ -478,6 +540,7 @@ impl NoiseChannel {
             envelope_counter: 0,
             current_volume: 0,
             output_volume: 0,
+            length_timer: 0,
         }
     }
 
@@ -507,6 +570,12 @@ impl NoiseChannel {
             self.step_envelope();
         }
 
+        self.length_timer = self.length_timer.wrapping_add(cycles);
+        while self.length_timer >= LENGTH_TICK_CYCLES {
+            self.length_timer -= LENGTH_TICK_CYCLES;
+            self.tick_length();
+        }
+
         let divisor = Self::divisor_value(self.divisor_code);
         let shift = self.shift_clock_frequency;
         let threshold = (NOISE_CLOCK_BASE / (divisor << shift)) / 2;
@@ -525,6 +594,19 @@ impl NoiseChannel {
         };
 
         self.output_volume
+    }
+
+    fn tick_length(&mut self) {
+        if !self.length_enable {
+            return;
+        }
+
+        if self.length_counter > 0 {
+            self.length_counter -= 1;
+            if self.length_counter == 0 {
+                self.enabled = false;
+            }
+        }
     }
 
     fn step_envelope(&mut self) {
@@ -565,6 +647,7 @@ impl NoiseChannel {
     pub fn reset(&mut self) {
         self.enabled = false;
         self.length = 0;
+        self.length_counter = 0;
         self.volume = 0;
         self.envelope_add = false;
         self.envelope_period = 0;
@@ -578,6 +661,7 @@ impl NoiseChannel {
         self.envelope_counter = 0;
         self.current_volume = 0;
         self.output_volume = 0;
+        self.length_timer = 0;
     }
 
     pub fn read_io(&self, addr: u16) -> u8 {
@@ -635,8 +719,10 @@ impl NoiseChannel {
         self.lfsr = 0x7FFF;
         self.timer = 0;
         self.envelope_timer = 0;
+        self.length_timer = 0;
         self.current_volume = self.volume;
         self.envelope_counter = self.envelope_period;
+        self.length_counter = if self.length == 0 { 64 } else { self.length };
     }
 
     pub fn output(&self) -> i32 {
@@ -1231,5 +1317,149 @@ mod tests {
                 let _ = apu.take_sample();
             }
         }
+    }
+
+    #[test]
+    fn pulse_channel_length_counter_decrements() {
+        let mut channel = PulseChannel::new();
+        channel.write_io(0xFF11, 0x20);
+        channel.write_io(0xFF12, 0x80);
+        channel.write_io(0xFF13, 0x00);
+        channel.write_io(0xFF14, 0xC0);
+        assert!(channel.enabled);
+        assert_eq!(channel.length_counter, 32);
+        let start_counter = channel.length_counter;
+        for _ in 0..(256 * 5) {
+            channel.step(256);
+        }
+        assert!(
+            channel.length_counter < start_counter,
+            "Length counter should have decremented: was {}, now {}",
+            start_counter,
+            channel.length_counter
+        );
+    }
+
+    #[test]
+    fn pulse_channel_stops_at_length_zero() {
+        let mut channel = PulseChannel::new();
+        channel.write_io(0xFF11, 0x01);
+        channel.write_io(0xFF12, 0x80);
+        channel.write_io(0xFF13, 0x00);
+        channel.write_io(0xFF14, 0xC0);
+        assert!(channel.enabled);
+        for _ in 0..(256 * 300) {
+            channel.step(256);
+        }
+        assert!(
+            !channel.enabled,
+            "Channel should stop when length counter reaches 0"
+        );
+    }
+
+    #[test]
+    fn wave_channel_length_counter_decrements() {
+        let mut channel = WaveChannel::new();
+        channel.write_io(0xFF1B, 0x80);
+        channel.write_io(0xFF1C, 0x20);
+        channel.write_io(0xFF1D, 0x00);
+        channel.write_io(0xFF1E, 0xC0);
+        assert!(channel.enabled);
+        assert_eq!(channel.length_counter, 128);
+        let start_counter = channel.length_counter;
+        for _ in 0..(256 * 5) {
+            channel.step(256);
+        }
+        assert!(
+            channel.length_counter < start_counter,
+            "Length counter should have decremented: was {}, now {}",
+            start_counter,
+            channel.length_counter
+        );
+    }
+
+    #[test]
+    fn wave_channel_stops_at_length_zero() {
+        let mut channel = WaveChannel::new();
+        channel.write_io(0xFF1B, 0x01);
+        channel.write_io(0xFF1C, 0x20);
+        channel.write_io(0xFF1D, 0x00);
+        channel.write_io(0xFF1E, 0xC0);
+        assert!(channel.enabled);
+        for _ in 0..(256 * 300) {
+            channel.step(256);
+        }
+        assert!(
+            !channel.enabled,
+            "Channel should stop when length counter reaches 0"
+        );
+    }
+
+    #[test]
+    fn noise_channel_length_counter_decrements() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF20, 0x20);
+        channel.write_io(0xFF21, 0x80);
+        channel.write_io(0xFF22, 0x00);
+        channel.write_io(0xFF23, 0xC0);
+        assert!(channel.enabled);
+        assert_eq!(channel.length_counter, 32);
+        let start_counter = channel.length_counter;
+        for _ in 0..(256 * 5) {
+            channel.step(256);
+        }
+        assert!(
+            channel.length_counter < start_counter,
+            "Length counter should have decremented: was {}, now {}",
+            start_counter,
+            channel.length_counter
+        );
+    }
+
+    #[test]
+    fn noise_channel_stops_at_length_zero() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF20, 0x01);
+        channel.write_io(0xFF21, 0x80);
+        channel.write_io(0xFF22, 0x00);
+        channel.write_io(0xFF23, 0xC0);
+        assert!(channel.enabled);
+        for _ in 0..(256 * 300) {
+            channel.step(256);
+        }
+        assert!(
+            !channel.enabled,
+            "Channel should stop when length counter reaches 0"
+        );
+    }
+
+    #[test]
+    fn length_counter_not_decremented_when_disabled() {
+        let mut channel = PulseChannel::new();
+        channel.write_io(0xFF11, 0x20);
+        channel.write_io(0xFF12, 0x80);
+        channel.write_io(0xFF13, 0x00);
+        channel.write_io(0xFF14, 0xC0);
+        assert!(channel.enabled);
+        assert!(channel.length_enable);
+        channel.length_enable = false;
+        let start_counter = channel.length_counter;
+        for _ in 0..(256 * 10) {
+            channel.step(256);
+        }
+        assert_eq!(
+            channel.length_counter, start_counter,
+            "Length counter should not decrement when length_enable is false"
+        );
+    }
+
+    #[test]
+    fn length_counter_uses_64_when_zero() {
+        let mut channel = PulseChannel::new();
+        channel.write_io(0xFF11, 0x00);
+        channel.write_io(0xFF12, 0x80);
+        channel.write_io(0xFF13, 0x00);
+        channel.write_io(0xFF14, 0xC0);
+        assert_eq!(channel.length_counter, 64, "Should use 64 when length is 0");
     }
 }
