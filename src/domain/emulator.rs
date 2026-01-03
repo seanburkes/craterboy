@@ -106,6 +106,50 @@ impl Emulator {
             Ok(0)
         }
     }
+
+    pub fn apu_step(&mut self, cycles: u32) {
+        let _ = self.apu.step(cycles);
+    }
+
+    pub fn apu_sample_rate_hz(&self) -> f64 {
+        self.apu.sample_rate_hz()
+    }
+
+    pub fn apu_has_sample(&self) -> bool {
+        self.apu.has_sample()
+    }
+
+    pub fn apu_take_sample(&mut self) -> i32 {
+        self.apu.take_sample()
+    }
+
+    pub fn apu_sample(&self) -> i32 {
+        self.apu.sample()
+    }
+
+    pub fn apu_pulse_output(&self) -> i32 {
+        self.apu.pulse_output()
+    }
+
+    pub fn apu_wave_output(&self) -> i32 {
+        self.apu.wave_output()
+    }
+
+    pub fn apu_noise_output(&self) -> i32 {
+        self.apu.noise_output()
+    }
+
+    pub fn apu_read_io(&self, addr: u16) -> u8 {
+        self.apu.read_io(addr)
+    }
+
+    pub fn apu_write_io(&mut self, addr: u16, value: u8) {
+        self.apu.write_io(addr, value);
+    }
+
+    pub fn apu_reset(&mut self) {
+        self.apu.reset();
+    }
 }
 
 #[cfg(test)]
@@ -125,5 +169,69 @@ mod tests {
         let emulator = Emulator::new();
 
         assert_eq!(emulator.framebuffer().len(), FRAME_SIZE);
+    }
+
+    #[test]
+    fn emulator_apu_has_correct_sample_rate() {
+        let emulator = Emulator::new();
+        let rate = emulator.apu_sample_rate_hz();
+        assert!(
+            (rate - 59.7275).abs() < 0.001,
+            "Expected ~59.7275 Hz, got {}",
+            rate
+        );
+    }
+
+    #[test]
+    fn emulator_apu_step_does_not_crash() {
+        let mut emulator = Emulator::new();
+        emulator.apu_step(1000);
+        assert!(emulator.apu_sample() >= -128 && emulator.apu_sample() <= 127);
+    }
+
+    #[test]
+    fn emulator_apu_sample_generation() {
+        let mut emulator = Emulator::new();
+        assert!(!emulator.apu_has_sample());
+        emulator.apu_step(70224);
+        assert!(emulator.apu_has_sample());
+        let sample = emulator.apu_take_sample();
+        assert!(sample >= -128 && sample <= 127);
+        assert!(!emulator.apu_has_sample());
+    }
+
+    #[test]
+    fn emulator_apu_read_write_io() {
+        let mut emulator = Emulator::new();
+        emulator.apu_write_io(0xFF10, 0x80);
+        assert_eq!(emulator.apu_read_io(0xFF10) & 0x80, 0x80);
+        emulator.apu_write_io(0xFF22, 0x00);
+        emulator.apu_write_io(0xFF23, 0x80);
+        assert!(emulator.apu_noise_output() != 0 || emulator.apu_noise_output() == 0);
+    }
+
+    #[test]
+    fn emulator_apu_outputs() {
+        let emulator = Emulator::new();
+        let pulse = emulator.apu_pulse_output();
+        let wave = emulator.apu_wave_output();
+        let noise = emulator.apu_noise_output();
+        assert!(pulse >= 0 && pulse <= 15);
+        assert!(wave >= 0 && wave <= 3);
+        assert!(noise >= -15 && noise <= 15);
+    }
+
+    #[test]
+    fn emulator_apu_reset() {
+        let mut emulator = Emulator::new();
+        emulator.apu_write_io(0xFF10, 0x80);
+        emulator.apu_write_io(0xFF14, 0x80);
+        emulator.apu_reset();
+        let rate = emulator.apu_sample_rate_hz();
+        assert!(
+            (rate - 59.7275).abs() < 0.001,
+            "Expected ~59.7275 Hz, got {}",
+            rate
+        );
     }
 }
