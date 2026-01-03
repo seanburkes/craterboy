@@ -25,6 +25,7 @@ const DMG_PALETTE: [[u8; 3]; 4] = [
 pub struct Ppu {
     cycle_counter: u32,
     bg_priority: Vec<u8>,
+    palette: [[u8; 3]; 4],
 }
 
 impl Ppu {
@@ -32,7 +33,12 @@ impl Ppu {
         Self {
             cycle_counter: 0,
             bg_priority: vec![0; FRAME_WIDTH * FRAME_HEIGHT],
+            palette: DMG_PALETTE,
         }
+    }
+
+    pub fn set_palette(&mut self, palette: [[u8; 3]; 4]) {
+        self.palette = palette;
     }
 
     pub fn step(&mut self, cycles: u32, bus: &Bus, framebuffer: &mut Framebuffer) -> bool {
@@ -48,12 +54,12 @@ impl Ppu {
     pub fn render_frame(&mut self, bus: &Bus, framebuffer: &mut Framebuffer) {
         let lcdc = bus.read8(REG_LCDC);
         if lcdc & 0x80 == 0 {
-            self.clear_frame(framebuffer, DMG_PALETTE[0]);
+            self.clear_frame(framebuffer, self.palette[0]);
             return;
         }
         let bg_enabled = lcdc & 0x01 != 0;
         if !bg_enabled {
-            self.clear_frame(framebuffer, DMG_PALETTE[0]);
+            self.clear_frame(framebuffer, self.palette[0]);
             self.clear_bg_priority();
         }
 
@@ -64,7 +70,7 @@ impl Ppu {
         let wx = bus.read8(REG_WX);
         let vram = bus.vram();
         if vram.len() < VRAM_SIZE {
-            self.clear_frame(framebuffer, DMG_PALETTE[0]);
+            self.clear_frame(framebuffer, self.palette[0]);
             return;
         }
 
@@ -117,7 +123,7 @@ impl Ppu {
                     let bit = 7 - line_x;
                     let color_id = ((hi >> bit) & 0x1) << 1 | ((lo >> bit) & 0x1);
                     let palette_index = (bgp >> (color_id * 2)) & 0x03;
-                    let color = DMG_PALETTE[palette_index as usize];
+                    let color = self.palette[palette_index as usize];
                     let idx = (y * width + x) * 3;
                     pixels[idx] = color[0];
                     pixels[idx + 1] = color[1];
@@ -197,7 +203,7 @@ impl Ppu {
                         continue;
                     }
                     let palette_index = (palette >> (color_id * 2)) & 0x03;
-                    let color = DMG_PALETTE[palette_index as usize];
+                    let color = self.palette[palette_index as usize];
                     let idx = (screen_y as usize * width + screen_x as usize) * 3;
                     if priority {
                         if self.bg_priority[screen_y as usize * width + screen_x as usize] != 0 {

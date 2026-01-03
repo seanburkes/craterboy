@@ -27,11 +27,51 @@ const FRAME_HEIGHT_U32: u32 = FRAME_HEIGHT as u32;
 const TILE_SIZE: usize = 8;
 const TILE_BYTES: usize = 16;
 const TILE_DATA_OFFSET: usize = 0x0000;
-const DMG_PALETTE: [[u8; 3]; 4] = [
-    [0xE0, 0xF8, 0xD0],
-    [0x88, 0xC0, 0x70],
-    [0x34, 0x68, 0x56],
-    [0x08, 0x18, 0x20],
+const DEFAULT_PALETTE_INDEX: usize = 0;
+
+#[derive(Debug, Clone, Copy)]
+struct PaletteDefinition {
+    name: &'static str,
+    colors: [[u8; 3]; 4],
+}
+
+const PALETTES: [PaletteDefinition; 4] = [
+    PaletteDefinition {
+        name: "DMG",
+        colors: [
+            [0xE0, 0xF8, 0xD0],
+            [0x88, 0xC0, 0x70],
+            [0x34, 0x68, 0x56],
+            [0x08, 0x18, 0x20],
+        ],
+    },
+    PaletteDefinition {
+        name: "Pocket",
+        colors: [
+            [0xF8, 0xF8, 0xF8],
+            [0xA8, 0xA8, 0xA8],
+            [0x50, 0x50, 0x50],
+            [0x10, 0x10, 0x10],
+        ],
+    },
+    PaletteDefinition {
+        name: "Ocean",
+        colors: [
+            [0xE0, 0xF4, 0xFF],
+            [0x8A, 0xC6, 0xD8],
+            [0x3E, 0x6F, 0x89],
+            [0x16, 0x2A, 0x3B],
+        ],
+    },
+    PaletteDefinition {
+        name: "Amber",
+        colors: [
+            [0xFF, 0xF4, 0xCF],
+            [0xE6, 0xC8, 0x73],
+            [0xA6, 0x6E, 0x2B],
+            [0x4A, 0x2B, 0x1A],
+        ],
+    },
 ];
 
 pub fn run(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
@@ -71,6 +111,7 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
     state.set_overlay_metric("FPS", "0.0");
     state.set_overlay_metric("Frame", "0.0 ms");
     state.set_overlay_metric("Target", &format!("{:.3} ms", target_ms));
+    state.set_overlay_metric("Palette", PALETTES[state.palette_index].name);
 
     let _ = event_loop.run(move |event, elwt| match event {
         Event::WindowEvent { event, window_id } if window_id == target_window_id => match event {
@@ -206,6 +247,7 @@ struct State {
     rom_frame_ready: bool,
     input: InputState,
     overlay: Overlay,
+    palette_index: usize,
     #[cfg(feature = "audio")]
     audio: AudioOutput,
     #[cfg(feature = "gamepad")]
@@ -457,6 +499,9 @@ impl State {
             }
         }
 
+        let palette_index = DEFAULT_PALETTE_INDEX;
+        emulator.set_palette(PALETTES[palette_index].colors);
+
         #[cfg(feature = "audio")]
         let mut audio = AudioOutput::new();
 
@@ -483,6 +528,7 @@ impl State {
             rom_frame_ready: false,
             input: InputState::default(),
             overlay: Overlay::new(),
+            palette_index,
             #[cfg(feature = "audio")]
             audio,
             #[cfg(feature = "gamepad")]
@@ -518,7 +564,12 @@ impl State {
         }
         if let Some(rom) = self.rom_bytes.as_deref() {
             if !self.rom_frame_ready {
-                Self::render_rom_tiles(self.emulator.framebuffer_mut().as_mut_slice(), rom);
+                let palette = PALETTES[self.palette_index].colors;
+                Self::render_rom_tiles(
+                    self.emulator.framebuffer_mut().as_mut_slice(),
+                    rom,
+                    palette,
+                );
                 self.rom_frame_ready = true;
             }
             return;
@@ -545,6 +596,9 @@ impl State {
         if pressed && !repeated && code == KeyCode::F1 {
             self.overlay.toggle();
         }
+        if pressed && !repeated && code == KeyCode::F2 {
+            self.cycle_palette(1);
+        }
         self.input.handle_key(code, pressed);
         self.input.apply(&mut self.emulator);
     }
@@ -553,10 +607,20 @@ impl State {
         self.overlay.set_metric(label, value);
     }
 
-    fn render_rom_tiles(framebuffer: &mut [u8], rom: &[u8]) {
+    fn cycle_palette(&mut self, delta: isize) {
+        let len = PALETTES.len() as isize;
+        let next = (self.palette_index as isize + delta + len) % len;
+        self.palette_index = next as usize;
+        let palette = PALETTES[self.palette_index].colors;
+        self.emulator.set_palette(palette);
+        self.rom_frame_ready = false;
+        self.set_overlay_metric("Palette", PALETTES[self.palette_index].name);
+    }
+
+    fn render_rom_tiles(framebuffer: &mut [u8], rom: &[u8], palette: [[u8; 3]; 4]) {
         let width = FRAME_WIDTH;
         let height = FRAME_HEIGHT;
-        let bg = DMG_PALETTE[0];
+        let bg = palette[0];
         for idx in (0..framebuffer.len()).step_by(3) {
             framebuffer[idx] = bg[0];
             framebuffer[idx + 1] = bg[1];
@@ -575,11 +639,17 @@ impl State {
             let tile = &rom[tile_offset..tile_offset + TILE_BYTES];
             let tile_x = (tile_index % tiles_per_row) * TILE_SIZE;
             let tile_y = (tile_index / tiles_per_row) * TILE_SIZE;
-            Self::draw_tile(framebuffer, tile, tile_x, tile_y);
+            Self::draw_tile(framebuffer, tile, tile_x, tile_y, palette);
         }
     }
 
-    fn draw_tile(framebuffer: &mut [u8], tile: &[u8], tile_x: usize, tile_y: usize) {
+    fn draw_tile(
+        framebuffer: &mut [u8],
+        tile: &[u8],
+        tile_x: usize,
+        tile_y: usize,
+        palette: [[u8; 3]; 4],
+    ) {
         let width = FRAME_WIDTH;
         for row in 0..TILE_SIZE {
             let lo = tile[row * 2];
@@ -587,7 +657,7 @@ impl State {
             for col in 0..TILE_SIZE {
                 let bit = 7 - col;
                 let color_index = ((hi >> bit) & 0x1) << 1 | ((lo >> bit) & 0x1);
-                let color = DMG_PALETTE[color_index as usize];
+                let color = palette[color_index as usize];
                 let x = tile_x + col;
                 let y = tile_y + row;
                 let idx = (y * width + x) * 3;

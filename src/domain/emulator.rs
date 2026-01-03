@@ -59,6 +59,10 @@ impl Emulator {
         &mut self.framebuffer
     }
 
+    pub fn set_palette(&mut self, palette: [[u8; 3]; 4]) {
+        self.ppu.set_palette(palette);
+    }
+
     pub fn has_bus(&self) -> bool {
         self.bus.is_some()
     }
