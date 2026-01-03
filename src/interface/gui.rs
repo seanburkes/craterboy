@@ -10,6 +10,9 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, WindowBuilder};
 
+const EFFECT_SMOOTHING_STRENGTH: f32 = 0.4;
+const EFFECT_OUTLINE_STRENGTH: f32 = 0.8;
+
 use crate::application::app;
 use crate::domain::{
     Cartridge, Emulator, FRAME_HEIGHT, FRAME_INTERVAL_NS, FRAME_SIZE, FRAME_WIDTH,
@@ -74,6 +77,76 @@ const PALETTES: [PaletteDefinition; 4] = [
     },
 ];
 
+#[derive(Debug, Clone, Copy)]
+enum ShaderEffect {
+    Nearest,
+    Smooth,
+    Toon,
+    SmoothToon,
+}
+
+impl ShaderEffect {
+    fn next(self) -> Self {
+        match self {
+            Self::Nearest => Self::Smooth,
+            Self::Smooth => Self::Toon,
+            Self::Toon => Self::SmoothToon,
+            Self::SmoothToon => Self::Nearest,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Nearest => "Nearest",
+            Self::Smooth => "Smooth",
+            Self::Toon => "Toon",
+            Self::SmoothToon => "Smooth+Toon",
+        }
+    }
+
+    fn mode(self) -> u32 {
+        match self {
+            Self::Nearest => 0,
+            Self::Smooth => 1,
+            Self::Toon => 2,
+            Self::SmoothToon => 3,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct EffectUniform {
+    mode: u32,
+    _pad0: [u32; 3],
+    _pad1: [u32; 4],
+    texel_size: [f32; 2],
+    smoothing_strength: f32,
+    outline_strength: f32,
+}
+
+impl EffectUniform {
+    fn new(effect: ShaderEffect) -> Self {
+        Self {
+            mode: effect.mode(),
+            _pad0: [0; 3],
+            _pad1: [0; 4],
+            texel_size: [1.0 / FRAME_WIDTH_U32 as f32, 1.0 / FRAME_HEIGHT_U32 as f32],
+            smoothing_strength: EFFECT_SMOOTHING_STRENGTH,
+            outline_strength: EFFECT_OUTLINE_STRENGTH,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                (self as *const Self) as *const u8,
+                std::mem::size_of::<Self>(),
+            )
+        }
+    }
+}
+
 pub fn run(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
     pollster::block_on(run_async(rom_path, boot_rom_path));
 }
@@ -112,6 +185,7 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
     state.set_overlay_metric("Frame", "0.0 ms");
     state.set_overlay_metric("Target", &format!("{:.3} ms", target_ms));
     state.set_overlay_metric("Palette", PALETTES[state.palette_index].name);
+    state.set_overlay_metric("Shader", state.effect.name());
 
     let _ = event_loop.run(move |event, elwt| match event {
         Event::WindowEvent { event, window_id } if window_id == target_window_id => match event {
@@ -248,6 +322,8 @@ struct State {
     input: InputState,
     overlay: Overlay,
     palette_index: usize,
+    effect: ShaderEffect,
+    effect_uniform: wgpu::Buffer,
     #[cfg(feature = "audio")]
     audio: AudioOutput,
     #[cfg(feature = "gamepad")]
@@ -421,6 +497,20 @@ impl State {
             ..Default::default()
         });
 
+        let effect = ShaderEffect::Nearest;
+        let effect_uniform = EffectUniform::new(effect);
+        let effect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("effect_uniform"),
+            size: std::mem::size_of::<EffectUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: true,
+        });
+        {
+            let mut view = effect_buffer.slice(..).get_mapped_range_mut();
+            view.copy_from_slice(effect_uniform.as_bytes());
+        }
+        effect_buffer.unmap();
+
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("texture_bind_group_layout"),
             entries: &[
@@ -440,6 +530,16 @@ impl State {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -454,6 +554,10 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&texture_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: effect_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -529,6 +633,8 @@ impl State {
             input: InputState::default(),
             overlay: Overlay::new(),
             palette_index,
+            effect,
+            effect_uniform: effect_buffer,
             #[cfg(feature = "audio")]
             audio,
             #[cfg(feature = "gamepad")]
@@ -599,12 +705,27 @@ impl State {
         if pressed && !repeated && code == KeyCode::F2 {
             self.cycle_palette(1);
         }
+        if pressed && !repeated && code == KeyCode::F3 {
+            self.cycle_shader();
+        }
         self.input.handle_key(code, pressed);
         self.input.apply(&mut self.emulator);
     }
 
     fn set_overlay_metric(&mut self, label: &str, value: impl Into<String>) {
         self.overlay.set_metric(label, value);
+    }
+
+    fn update_effect_uniform(&self) {
+        let uniform = EffectUniform::new(self.effect);
+        self.queue
+            .write_buffer(&self.effect_uniform, 0, uniform.as_bytes());
+    }
+
+    fn cycle_shader(&mut self) {
+        self.effect = self.effect.next();
+        self.update_effect_uniform();
+        self.set_overlay_metric("Shader", self.effect.name());
     }
 
     fn cycle_palette(&mut self, delta: isize) {
