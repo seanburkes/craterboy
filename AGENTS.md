@@ -257,3 +257,43 @@ sg -p 'Result<$type, $err>'
 ## Rust Edition
 
 This project uses **Rust 2024 edition**. Use modern Rust idioms and features.
+
+## Recommended CLI Tools
+
+Install these tools to improve development workflow:
+
+### Code Navigation & Analysis
+- **ast-grep** (`sg`): Structural code search and refactoring - MUST use for Rust patterns
+- **ripgrep** (`rg`): Fast text search - MUST use instead of `grep`
+- **cargo-modules**: Visualize module structure (`cargo install cargo-modules`)
+- **cargo-expand**: Expand macros to see generated code
+
+### Productivity
+- **fzf**: Fuzzy finder - use with `Ctrl+R` for command history, `Ctrl+T` for files
+- **zoxide**: Smart `cd` that learns your most-used directories (`z <dir>`)
+- **eza**: Modern `ls` replacement with better formatting (`cargo install eza`)
+- **bat**: Better `cat` with syntax highlighting (`cargo install bat`)
+- **delta**: Syntax-highlighted git diff (`cargo install delta`)
+
+### Development Workflow
+- **cargo-watch**: Auto-rebuild on file changes (`cargo install cargo-watch`)
+- **cargo-nextest**: Faster test runner (`cargo install cargo-nextest`)
+- **cargo-expand**: Expand macros to debug derive macros
+
+### Quick Navigation
+```bash
+# Find in files (MUST use ripgrep, not grep/rg from ripgrep package)
+sg "pattern" --type rust
+
+# Find all references to a type
+sg -r A 'Cpu'
+
+# Find all function definitions
+sg -p 'fn $name(...)' --type rust
+
+# File tree with module hierarchy
+cargo modules tree
+
+# Watch and rebuild
+cargo watch -x build
+```
