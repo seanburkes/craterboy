@@ -17,6 +17,7 @@ slint::slint! {
         in property <bool> has_rom;
         callback load_rom();
         callback resume();
+        callback quit();
         callback browse_files();
         background: transparent;
 
@@ -100,6 +101,10 @@ slint::slint! {
                         enabled: root.has_rom;
                         clicked => { root.resume(); }
                     }
+                    Button {
+                        text: "Quit";
+                        clicked => { root.quit(); }
+                    }
                 }
 
                 Rectangle {
@@ -134,6 +139,7 @@ slint::slint! {
 pub enum MenuAction {
     LoadRom(String),
     Resume,
+    Quit,
     ShowFilePicker,
 }
 
@@ -202,6 +208,11 @@ impl MenuOverlay {
         let actions_browse = actions.clone();
         ui.on_browse_files(move || {
             actions_browse.borrow_mut().push(MenuAction::ShowFilePicker);
+        });
+
+        let actions_quit = actions.clone();
+        ui.on_quit(move || {
+            actions_quit.borrow_mut().push(MenuAction::Quit);
         });
 
         let buffer = vec![PremultipliedRgbaColor::default(); width * height];

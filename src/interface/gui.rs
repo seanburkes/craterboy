@@ -268,6 +268,12 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
                 }
             }
             WindowEvent::RedrawRequested => {
+                if state.quit_requested {
+                    #[cfg(feature = "audio")]
+                    state.audio.stop();
+                    elwt.exit();
+                    return;
+                }
                 state.update_frame();
                 match state.render() {
                     Ok(()) => {}
@@ -420,6 +426,7 @@ struct State {
     menu: MenuOverlay,
     menu_visible: bool,
     menu_cursor: Option<slint::LogicalPosition>,
+    quit_requested: bool,
     #[cfg(feature = "audio")]
     audio: AudioOutput,
     #[cfg(feature = "gamepad")]
@@ -848,6 +855,7 @@ impl State {
             menu,
             menu_visible: !has_bus,
             menu_cursor: None,
+            quit_requested: false,
             #[cfg(feature = "audio")]
             audio,
             #[cfg(feature = "gamepad")]
@@ -962,6 +970,9 @@ impl State {
                         self.menu_visible = false;
                         self.menu_cursor = None;
                     }
+                }
+                MenuAction::Quit => {
+                    self.quit_requested = true;
                 }
                 MenuAction::ShowFilePicker => {
                     if let Some(path) = Self::show_file_picker() {

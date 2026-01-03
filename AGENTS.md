@@ -220,6 +220,40 @@ pub fn apply_post_boot_state(&mut self) { ... }
 - `ab_glyph`: Font rendering
 - `pollster`: Async runtime for wgpu
 
+## Search & Code Analysis Tools
+
+### Preferred Tools
+- **ast-grep** (`ast-grep` or `sg`): Use for structural code search and refactoring. It understands Rust syntax and can search for code patterns like "find all match arms that match this pattern" or "find all functions returning Result".
+- **ripgrep** (`rg`): Use for text-based search, especially when searching for strings, regex patterns, or in non-code files.
+
+### When to Use Each Tool
+
+| Task | Preferred Tool |
+|------|----------------|
+| Find function definitions | `rg` with `-n` |
+| Find all uses of a struct/method | `ast-grep` (`sg -r A 'StructName'`) |
+| Refactor variable names | `ast-grep` with `--rewrite` |
+| Search for patterns in match arms-grep` (`sg | `ast -p 'match $expr { ... }'`) |
+| Find TODO comments | `rg` (`rg -n 'TODO'`) |
+| Search in specific file types | `rg` with `--type rust` |
+| Find all `Result` return types | `ast-grep` (`sg -p 'fn $name(...) -> Result<...>'`) |
+| Find code matching exact AST patterns | `ast-grep` |
+
+### Example Commands
+```bash
+# Find all occurrences of a pattern using ast-grep
+sg -r A 'self.bus'
+
+# Find struct definitions using ripgrep
+rg -n 'pub struct Cpu'
+
+# Find all match expressions
+sg -p 'match $expr { ... }'
+
+# Find all error handling patterns
+sg -p 'Result<$type, $err>'
+```
+
 ## Rust Edition
 
 This project uses **Rust 2024 edition**. Use modern Rust idioms and features.
