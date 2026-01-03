@@ -45,44 +45,43 @@ impl AudioOutput {
         let emulator_ptr = emulator as *mut Emulator as usize;
 
         thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let mut interp_phase: f64 = 0.0;
-            let mut prev_sample: i32 = 0;
-            let mut sample_available = false;
+            let mut buffer = Vec::with_capacity(1024);
+            let mut phase: f64 = 0.0;
+            let mut prev_sample: f64 = 0.0;
+            let mut curr_sample: f64 = 0.0;
+            let mut has_curr = false;
 
             while running.load(Ordering::SeqCst) {
                 let emulator = unsafe { &mut *(emulator_ptr as *mut Emulator) };
 
                 if emulator.apu_has_sample() {
-                    let sample = emulator.apu_take_sample();
-                    prev_sample = sample;
-                    sample_available = true;
+                    prev_sample = curr_sample;
+                    curr_sample = emulator.apu_take_sample() as f64;
+                    has_curr = true;
                 }
 
-                while interp_phase < 1.0 {
-                    if buffer.len() >= 512 {
+                while phase < 1.0 {
+                    if buffer.len() >= 960 {
                         break;
                     }
 
-                    let interpolated = if sample_available {
-                        let sample = emulator.apu_take_sample();
-                        prev_sample = sample;
-                        sample_available = false;
-                        sample as f64
+                    let interpolated = if has_curr {
+                        let t = phase.clamp(0.0, 1.0);
+                        prev_sample + (curr_sample - prev_sample) * t
                     } else {
-                        prev_sample as f64
+                        prev_sample
                     };
 
                     let output_sample = interpolated.clamp(-128.0, 127.0) as i16;
                     buffer.push(output_sample);
                     buffer.push(output_sample);
 
-                    interp_phase += 1.0 / UPSAMPLE_RATIO;
+                    phase += 1.0 / UPSAMPLE_RATIO;
                 }
 
-                interp_phase -= 1.0;
+                phase -= 1.0;
 
-                if !buffer.is_empty() {
+                if buffer.len() >= 512 {
                     let rodio_samples: Vec<i16> = buffer.drain(..).collect();
                     if let Some(sink_guard) = sink.lock().unwrap().as_ref() {
                         if !sink_guard.empty() {
