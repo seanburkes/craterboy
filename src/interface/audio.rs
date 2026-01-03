@@ -118,12 +118,6 @@ impl AudioOutput {
                 queue.pop_front();
             }
             queue.extend(drained);
-            if queue.len() > self.target_buffer_frames {
-                let excess = queue.len().saturating_sub(self.target_buffer_frames);
-                for _ in 0..excess {
-                    queue.pop_front();
-                }
-            }
         }
 
         let mut viz = self.visualizer_samples.lock().unwrap();
@@ -210,6 +204,7 @@ impl AudioOutput {
 struct RingSource {
     samples: Arc<Mutex<VecDeque<[i16; 2]>>>,
     sample_rate: u32,
+    last_frame: [i16; 2],
     pending_frame: Option<[i16; 2]>,
     pending_index: u8,
 }
@@ -219,6 +214,7 @@ impl RingSource {
         Self {
             samples,
             sample_rate,
+            last_frame: [0, 0],
             pending_frame: None,
             pending_index: 0,
         }
@@ -244,11 +240,17 @@ impl Iterator for RingSource {
         let frame = self.samples.lock().unwrap().pop_front();
         match frame {
             Some(frame) => {
+                self.last_frame = frame;
                 self.pending_frame = Some(frame);
                 self.pending_index = 1;
                 Some(frame[0])
             }
-            None => Some(0),
+            None => {
+                let frame = self.last_frame;
+                self.pending_frame = Some(frame);
+                self.pending_index = 1;
+                Some(frame[0])
+            }
         }
     }
 }

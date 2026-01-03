@@ -227,7 +227,7 @@ impl Emulator {
 
 #[cfg(test)]
 mod tests {
-    use super::{Emulator, DEFAULT_OUTPUT_SAMPLE_RATE_HZ};
+    use super::{DEFAULT_OUTPUT_SAMPLE_RATE_HZ, Emulator};
     use crate::domain::cartridge::ROM_BANK_SIZE;
     use crate::domain::{Cartridge, FRAME_SIZE};
 
