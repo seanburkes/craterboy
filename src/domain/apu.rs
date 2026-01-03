@@ -11,7 +11,13 @@ const REG_NR34: u16 = 0xFF1E;
 const WAVE_RAM_START: u16 = 0xFF30;
 const WAVE_RAM_SIZE: usize = 16;
 
+const REG_NR41: u16 = 0xFF20;
+const REG_NR42: u16 = 0xFF21;
+const REG_NR43: u16 = 0xFF22;
+const REG_NR44: u16 = 0xFF23;
+
 const FREQ_DIVISOR: u32 = 131072;
+const NOISE_CLOCK_BASE: u32 = 524288;
 
 #[derive(Debug)]
 pub struct WaveChannel {
@@ -166,9 +172,180 @@ impl WaveChannel {
 }
 
 #[derive(Debug)]
+pub struct NoiseChannel {
+    enabled: bool,
+    length: u8,
+    volume: u8,
+    envelope_add: bool,
+    envelope_period: u8,
+    length_enable: bool,
+    shift_clock_frequency: u8,
+    seven_bit_mode: bool,
+    divisor_code: u8,
+    lfsr: u16,
+    timer: u32,
+    envelope_counter: u8,
+    current_volume: u8,
+    output_volume: i32,
+}
+
+impl NoiseChannel {
+    pub fn new() -> Self {
+        Self {
+            enabled: false,
+            length: 0,
+            volume: 0,
+            envelope_add: false,
+            envelope_period: 0,
+            length_enable: false,
+            shift_clock_frequency: 0,
+            seven_bit_mode: false,
+            divisor_code: 0,
+            lfsr: 0,
+            timer: 0,
+            envelope_counter: 0,
+            current_volume: 0,
+            output_volume: 0,
+        }
+    }
+
+    fn divisor_value(code: u8) -> u32 {
+        match code {
+            0 => 8,
+            1 => 16,
+            2 => 32,
+            3 => 48,
+            4 => 64,
+            5 => 80,
+            6 => 96,
+            7 => 112,
+            _ => 8,
+        }
+    }
+
+    pub fn step(&mut self, cycles: u32) -> i32 {
+        if !self.enabled {
+            self.output_volume = 0;
+            return 0;
+        }
+
+        let divisor = Self::divisor_value(self.divisor_code);
+        let shift = self.shift_clock_frequency;
+        let threshold = (NOISE_CLOCK_BASE / (divisor << shift)) / 2;
+
+        self.timer = self.timer.wrapping_add(cycles);
+
+        while self.timer >= threshold {
+            self.timer -= threshold;
+            self.clock_lfsr();
+        }
+
+        self.output_volume = if (self.lfsr & 0x01) == 0 {
+            self.current_volume as i32
+        } else {
+            -(self.current_volume as i32)
+        };
+
+        self.output_volume
+    }
+
+    fn clock_lfsr(&mut self) {
+        let feedback = (self.lfsr & 0x01) ^ ((self.lfsr >> 1) & 0x01);
+        self.lfsr >>= 1;
+        if self.seven_bit_mode {
+            self.lfsr &= 0x7F;
+            self.lfsr |= feedback << 6;
+        } else {
+            self.lfsr &= 0x7FFF;
+            self.lfsr |= feedback << 14;
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.enabled = false;
+        self.length = 0;
+        self.volume = 0;
+        self.envelope_add = false;
+        self.envelope_period = 0;
+        self.length_enable = false;
+        self.shift_clock_frequency = 0;
+        self.seven_bit_mode = false;
+        self.divisor_code = 0;
+        self.lfsr = 0;
+        self.timer = 0;
+        self.envelope_counter = 0;
+        self.current_volume = 0;
+        self.output_volume = 0;
+    }
+
+    pub fn read_io(&self, addr: u16) -> u8 {
+        match addr {
+            REG_NR41 => self.length & 0x3F,
+            REG_NR42 => {
+                (self.volume << 4)
+                    | (if self.envelope_add { 0x08 } else { 0 })
+                    | (self.envelope_period & 0x07)
+            }
+            REG_NR43 => {
+                (self.shift_clock_frequency << 4)
+                    | (if self.seven_bit_mode { 0x08 } else { 0 })
+                    | (self.divisor_code & 0x07)
+            }
+            REG_NR44 => {
+                let mut value = 0;
+                if self.length_enable {
+                    value |= 0x40;
+                }
+                value
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn write_io(&mut self, addr: u16, value: u8) {
+        match addr {
+            REG_NR41 => {
+                self.length = value & 0x3F;
+            }
+            REG_NR42 => {
+                self.volume = (value >> 4) & 0x0F;
+                self.envelope_add = value & 0x08 != 0;
+                self.envelope_period = value & 0x07;
+                self.current_volume = self.volume;
+            }
+            REG_NR43 => {
+                self.shift_clock_frequency = (value >> 4) & 0x0F;
+                self.seven_bit_mode = value & 0x08 != 0;
+                self.divisor_code = value & 0x07;
+            }
+            REG_NR44 => {
+                self.length_enable = value & 0x40 != 0;
+                if value & 0x80 != 0 {
+                    self.trigger();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn trigger(&mut self) {
+        self.enabled = true;
+        self.lfsr = 0x7FFF;
+        self.timer = 0;
+        self.current_volume = self.volume;
+        self.envelope_counter = self.envelope_period;
+    }
+
+    pub fn output(&self) -> i32 {
+        self.output_volume
+    }
+}
+
+#[derive(Debug)]
 pub struct Apu {
     frame_cycles: u32,
     wave_channel: WaveChannel,
+    noise_channel: NoiseChannel,
 }
 
 impl Apu {
@@ -176,12 +353,14 @@ impl Apu {
         Self {
             frame_cycles: FRAME_CYCLES,
             wave_channel: WaveChannel::new(),
+            noise_channel: NoiseChannel::new(),
         }
     }
 
     pub fn step(&mut self, cycles: u32) -> Result<(), ()> {
         self.frame_cycles = self.frame_cycles.wrapping_add(cycles);
         self.wave_channel.step(cycles);
+        self.noise_channel.step(cycles);
         Ok(())
     }
 
@@ -192,11 +371,13 @@ impl Apu {
     pub fn reset(&mut self) {
         self.frame_cycles = FRAME_CYCLES;
         self.wave_channel.reset();
+        self.noise_channel.reset();
     }
 
     pub fn read_io(&self, addr: u16) -> u8 {
         match addr {
             REG_NR30 | REG_NR31 | REG_NR32 | REG_NR33 | REG_NR34 => self.wave_channel.read_io(addr),
+            REG_NR41 | REG_NR42 | REG_NR43 | REG_NR44 => self.noise_channel.read_io(addr),
             WAVE_RAM_START..=0xFF3F => self.wave_channel.read_wave_ram(addr),
             _ => 0,
         }
@@ -207,17 +388,28 @@ impl Apu {
             REG_NR30 | REG_NR31 | REG_NR32 | REG_NR33 | REG_NR34 => {
                 self.wave_channel.write_io(addr, value);
             }
+            REG_NR41 | REG_NR42 | REG_NR43 | REG_NR44 => {
+                self.noise_channel.write_io(addr, value);
+            }
             WAVE_RAM_START..=0xFF3F => {
                 self.wave_channel.write_wave_ram(addr, value);
             }
             _ => {}
         }
     }
+
+    pub fn wave_output(&self) -> i32 {
+        self.wave_channel.output()
+    }
+
+    pub fn noise_output(&self) -> i32 {
+        self.noise_channel.output()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Apu, FRAME_CYCLES, WaveChannel};
+    use super::{Apu, FRAME_CYCLES, NoiseChannel, WaveChannel};
 
     #[test]
     fn new_apu_initializes_correctly() {
@@ -296,5 +488,101 @@ mod tests {
         channel.volume_code = 1;
         channel.wave_ram = [0xFF; 16];
         let _ = channel.step(100);
+    }
+
+    #[test]
+    fn noise_channel_new_has_correct_defaults() {
+        let channel = NoiseChannel::new();
+        assert!(!channel.enabled);
+        assert_eq!(channel.volume, 0);
+        assert_eq!(channel.shift_clock_frequency, 0);
+        assert_eq!(channel.divisor_code, 0);
+    }
+
+    #[test]
+    fn noise_channel_read_write_nr41() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF20, 0x3F);
+        assert_eq!(channel.read_io(0xFF20), 0x3F);
+    }
+
+    #[test]
+    fn noise_channel_read_write_nr42() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF21, 0x80);
+        assert_eq!(channel.volume, 0x08);
+        assert!(!channel.envelope_add);
+        assert_eq!(channel.envelope_period, 0x00);
+        channel.write_io(0xFF21, 0xFF);
+        assert_eq!(channel.volume, 0x0F);
+        assert!(channel.envelope_add);
+        assert_eq!(channel.envelope_period, 0x07);
+    }
+
+    #[test]
+    fn noise_channel_read_write_nr43() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF22, 0x00);
+        assert_eq!(channel.shift_clock_frequency, 0x00);
+        assert!(!channel.seven_bit_mode);
+        assert_eq!(channel.divisor_code, 0x00);
+        channel.write_io(0xFF22, 0xF8);
+        assert_eq!(channel.shift_clock_frequency, 0x0F);
+        assert!(channel.seven_bit_mode);
+        assert_eq!(channel.divisor_code, 0x00);
+    }
+
+    #[test]
+    fn noise_channel_read_write_nr44() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF23, 0x40);
+        assert!(channel.length_enable);
+        assert_eq!(channel.read_io(0xFF23), 0x40);
+    }
+
+    #[test]
+    fn noise_channel_trigger() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF21, 0x80);
+        channel.write_io(0xFF22, 0x00);
+        channel.write_io(0xFF23, 0x80);
+        assert!(channel.enabled);
+        assert_eq!(channel.lfsr, 0x7FFF);
+    }
+
+    #[test]
+    fn noise_channel_step_returns_zero_when_disabled() {
+        let mut channel = NoiseChannel::new();
+        let output = channel.step(100);
+        assert_eq!(output, 0);
+    }
+
+    #[test]
+    fn noise_channel_step_with_trigger() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF21, 0x80);
+        channel.write_io(0xFF22, 0x00);
+        channel.write_io(0xFF23, 0x80);
+        let _ = channel.step(100);
+    }
+
+    #[test]
+    fn noise_channel_lfsr_15bit_mode() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF22, 0x00);
+        channel.write_io(0xFF23, 0x80);
+        channel.step(100000);
+        let lfsr = channel.lfsr;
+        assert_ne!(lfsr, 0x7FFF, "LFSR should have shifted at least once");
+    }
+
+    #[test]
+    fn noise_channel_7bit_mode() {
+        let mut channel = NoiseChannel::new();
+        channel.write_io(0xFF22, 0x08);
+        channel.write_io(0xFF23, 0x80);
+        channel.step(100000);
+        let lfsr = channel.lfsr;
+        assert!(lfsr & 0xFF80 == 0, "LFSR should be 7-bit: {:016b}", lfsr);
     }
 }
