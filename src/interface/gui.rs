@@ -16,6 +16,9 @@ use crate::domain::{
 };
 use crate::infrastructure::rom_loader::RomLoadError;
 
+#[cfg(feature = "audio")]
+use crate::interface::audio::AudioOutput;
+
 #[cfg(feature = "gamepad")]
 use gilrs::{Axis, Button, Gamepad, GamepadId, Gilrs};
 
@@ -71,7 +74,10 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
 
     let _ = event_loop.run(move |event, elwt| match event {
         Event::WindowEvent { event, window_id } if window_id == target_window_id => match event {
-            WindowEvent::CloseRequested => elwt.exit(),
+            WindowEvent::CloseRequested => {
+                state.audio.stop();
+                elwt.exit();
+            }
             WindowEvent::Resized(size) => state.resize(size),
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
@@ -199,6 +205,7 @@ struct State {
     rom_frame_ready: bool,
     input: InputState,
     overlay: Overlay,
+    audio: AudioOutput,
     #[cfg(feature = "gamepad")]
     gilrs: Option<Gilrs>,
 }
@@ -448,6 +455,9 @@ impl State {
             }
         }
 
+        let mut audio = AudioOutput::new();
+        audio.start(&mut emulator);
+
         #[cfg(feature = "gamepad")]
         let gilrs = Gilrs::new().ok();
 
@@ -468,6 +478,7 @@ impl State {
             rom_frame_ready: false,
             input: InputState::default(),
             overlay: Overlay::new(),
+            audio,
             #[cfg(feature = "gamepad")]
             gilrs,
         }
