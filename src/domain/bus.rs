@@ -273,6 +273,10 @@ impl Bus {
         }
     }
 
+    pub fn is_double_speed(&self) -> bool {
+        self.double_speed
+    }
+
     pub fn is_cgb(&self) -> bool {
         self.cgb_mode
     }
@@ -523,7 +527,9 @@ impl Bus {
             }
             REG_KEY0 => {}
             REG_KEY1 => {
-                self.speed_switch_pending = value & 0x01 != 0;
+                if self.cgb_mode {
+                    self.speed_switch_pending = value & 0x01 != 0;
+                }
             }
             REG_VBK => {
                 self.vram_bank = value & 0x01;
@@ -669,7 +675,7 @@ impl Bus {
     }
 
     fn read_key1(&self) -> u8 {
-        let mut value = 0x7E;
+        let mut value = 0x00;
         if self.double_speed {
             value |= 0x80;
         }
@@ -956,6 +962,7 @@ mod tests {
     fn bus_key1_speed_switch() {
         let mut rom = vec![0; ROM_BANK_SIZE];
         rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
         let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
         let mut bus = Bus::new(cartridge).expect("bus");
 
@@ -1180,5 +1187,149 @@ mod tests {
 
         assert_eq!(bus.vram_bank(), 0);
         assert_eq!(bus.read8(REG_VBK) & 0xFE, 0xFE);
+    }
+
+    #[test]
+    fn bus_key1_initial_state_dmg_mode() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x00; // DMG only
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let bus = Bus::new(cartridge).expect("bus");
+
+        // In DMG mode, KEY1 should read as 0x00
+        assert_eq!(bus.read8(REG_KEY1), 0x00);
+        assert!(!bus.is_double_speed());
+        assert!(!bus.speed_switch_pending());
+    }
+
+    #[test]
+    fn bus_key1_initial_state_cgb_mode() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let bus = Bus::new(cartridge).expect("bus");
+
+        // In CGB mode, should start in normal speed mode
+        assert_eq!(bus.read8(REG_KEY1), 0x00);
+        assert!(!bus.is_double_speed());
+        assert!(!bus.speed_switch_pending());
+    }
+
+    #[test]
+    fn bus_key1_arm_speed_switch() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Arm the speed switch
+        bus.write8(REG_KEY1, 0x01);
+        assert_eq!(bus.read8(REG_KEY1) & 0x01, 0x01);
+        assert_eq!(bus.read8(REG_KEY1) & 0x80, 0x00);
+        assert!(bus.speed_switch_pending());
+        assert!(!bus.is_double_speed());
+
+        // Clear the switch
+        bus.write8(REG_KEY1, 0x00);
+        assert_eq!(bus.read8(REG_KEY1) & 0x01, 0x00);
+        assert!(!bus.speed_switch_pending());
+    }
+
+    #[test]
+    fn bus_key1_perform_speed_switch_to_double() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Arm and perform switch to double speed
+        bus.write8(REG_KEY1, 0x01);
+        bus.perform_speed_switch();
+
+        assert_eq!(bus.read8(REG_KEY1) & 0x01, 0x00);
+        assert_eq!(bus.read8(REG_KEY1) & 0x80, 0x80);
+        assert!(!bus.speed_switch_pending());
+        assert!(bus.is_double_speed());
+    }
+
+    #[test]
+    fn bus_key1_perform_speed_switch_to_normal() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // First switch to double speed
+        bus.write8(REG_KEY1, 0x01);
+        bus.perform_speed_switch();
+        assert!(bus.is_double_speed());
+
+        // Then switch back to normal speed
+        bus.write8(REG_KEY1, 0x01);
+        bus.perform_speed_switch();
+
+        assert_eq!(bus.read8(REG_KEY1) & 0x01, 0x00);
+        assert_eq!(bus.read8(REG_KEY1) & 0x80, 0x00);
+        assert!(!bus.speed_switch_pending());
+        assert!(!bus.is_double_speed());
+    }
+
+    #[test]
+    fn bus_key1_no_effect_in_dmg_mode() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x00; // DMG only
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Writing KEY1 in DMG mode should have no effect
+        bus.write8(REG_KEY1, 0x01);
+        assert_eq!(bus.read8(REG_KEY1), 0x00);
+        assert!(!bus.speed_switch_pending());
+        assert!(!bus.is_double_speed());
+
+        bus.perform_speed_switch();
+        assert_eq!(bus.read8(REG_KEY1), 0x00);
+        assert!(!bus.speed_switch_pending());
+        assert!(!bus.is_double_speed());
+    }
+
+    #[test]
+    fn bus_key1_write_other_bits_ignored() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Write with other bits set - only bit 0 should be considered
+        bus.write8(REG_KEY1, 0xFF);
+        assert!(bus.speed_switch_pending());
+        assert!(!bus.is_double_speed());
+
+        // Read should only have bit 0 set (speed pending), others 0
+        let key1_value = bus.read8(REG_KEY1);
+        assert_eq!(key1_value & 0x01, 0x01);
+        assert_eq!(key1_value & 0xFE, 0x00);
+    }
+
+    #[test]
+    fn bus_key1_perform_switch_no_pending() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Perform switch without pending should do nothing
+        bus.perform_speed_switch();
+        assert_eq!(bus.read8(REG_KEY1), 0x00);
+        assert!(!bus.is_double_speed());
+        assert!(!bus.speed_switch_pending());
     }
 }
