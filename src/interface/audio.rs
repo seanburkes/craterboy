@@ -8,6 +8,7 @@ use std::time::Duration;
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 const APU_SAMPLE_RATE: f64 = 59.7275;
 const UPSAMPLE_RATIO: f64 = AUDIO_SAMPLE_RATE as f64 / APU_SAMPLE_RATE;
+const CHUNK_SIZE: usize = 512;
 
 pub struct AudioOutput {
     stream: Option<OutputStream>,
@@ -45,58 +46,62 @@ impl AudioOutput {
         let emulator_ptr = emulator as *mut Emulator as usize;
 
         thread::spawn(move || {
-            let mut buffer = Vec::with_capacity(1024);
+            let mut output_buffer: Vec<i16> = Vec::with_capacity(CHUNK_SIZE * 2);
+            let mut input_buffer: Vec<f64> = Vec::new();
             let mut phase: f64 = 0.0;
             let mut prev_sample: f64 = 0.0;
-            let mut curr_sample: f64 = 0.0;
-            let mut has_curr = false;
+            let mut next_sample: f64 = 0.0;
+            let mut sample_index: usize = 0;
+            let mut pending_sample: bool = false;
 
             while running.load(Ordering::SeqCst) {
                 let emulator = unsafe { &mut *(emulator_ptr as *mut Emulator) };
 
-                if emulator.apu_has_sample() {
-                    prev_sample = curr_sample;
-                    curr_sample = emulator.apu_take_sample() as f64;
-                    has_curr = true;
+                while emulator.apu_has_sample() && input_buffer.len() < 256 {
+                    input_buffer.push(emulator.apu_take_sample() as f64);
                 }
 
-                while phase < 1.0 {
-                    if buffer.len() >= 960 {
-                        break;
-                    }
+                if !pending_sample && !input_buffer.is_empty() {
+                    prev_sample = next_sample;
+                    next_sample = input_buffer.remove(0);
+                    pending_sample = true;
+                    sample_index = 0;
+                }
 
-                    let interpolated = if has_curr {
+                output_buffer.clear();
+
+                while phase < 1.0 && output_buffer.len() < CHUNK_SIZE * 2 {
+                    let interpolated = if pending_sample {
                         let t = phase.clamp(0.0, 1.0);
-                        prev_sample + (curr_sample - prev_sample) * t
+                        prev_sample + (next_sample - prev_sample) * t
                     } else {
-                        prev_sample
+                        next_sample
                     };
 
                     let output_sample = interpolated.clamp(-128.0, 127.0) as i16;
-                    buffer.push(output_sample);
-                    buffer.push(output_sample);
+                    output_buffer.push(output_sample);
+                    output_buffer.push(output_sample);
 
                     phase += 1.0 / UPSAMPLE_RATIO;
+                    sample_index += 1;
                 }
 
-                phase -= 1.0;
+                phase -= (phase as u32) as f64;
 
-                if buffer.len() >= 512 {
-                    let rodio_samples: Vec<i16> = buffer.drain(..).collect();
+                if !output_buffer.is_empty() {
                     if let Some(sink_guard) = sink.lock().unwrap().as_ref() {
-                        if !sink_guard.empty() {
+                        while sink_guard.len() > 8 {
                             thread::sleep(Duration::from_millis(1));
-                            continue;
                         }
                         sink_guard.append(rodio::buffer::SamplesBuffer::new(
                             2,
                             AUDIO_SAMPLE_RATE,
-                            rodio_samples,
+                            output_buffer.clone(),
                         ));
-                    } else {
-                        thread::sleep(Duration::from_millis(1));
                     }
-                } else {
+                }
+
+                if output_buffer.len() < CHUNK_SIZE * 2 {
                     thread::sleep(Duration::from_millis(1));
                 }
             }
