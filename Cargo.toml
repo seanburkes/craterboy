@@ -11,6 +11,7 @@ wgpu = "0.19"
 winit = "0.29"
 ab_glyph = "0.2"
 slint = "1.5"
+rfd = "0.14"
 rodio = { version = "0.18", optional = true }
 gilrs = { version = "0.10", optional = true }
 

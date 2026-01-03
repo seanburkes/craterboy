@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 
+use rfd::FileDialog;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -250,7 +251,11 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
                     window.request_redraw();
                 }
             }
-            WindowEvent::MouseInput { state: button_state, button, .. } => {
+            WindowEvent::MouseInput {
+                state: button_state,
+                button,
+                ..
+            } => {
                 if state.menu_visible {
                     state.handle_menu_mouse_input(button_state, button);
                     window.request_redraw();
@@ -367,10 +372,18 @@ fn menu_error_message(path: &PathBuf, err: RomLoadError) -> String {
             format!("Failed to read ROM '{}': {}", path.display(), io_err)
         }
         RomLoadError::Header(header_err) => {
-            format!("Invalid ROM header for '{}': {:?}", path.display(), header_err)
+            format!(
+                "Invalid ROM header for '{}': {:?}",
+                path.display(),
+                header_err
+            )
         }
         RomLoadError::SaveIo(io_err) => {
-            format!("Failed to read save data for '{}': {}", path.display(), io_err)
+            format!(
+                "Failed to read save data for '{}': {}",
+                path.display(),
+                io_err
+            )
         }
     }
 }
@@ -708,12 +721,11 @@ impl State {
             source: wgpu::ShaderSource::Wgsl(include_str!("shader_menu.wgsl").into()),
         });
 
-        let menu_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("menu_pipeline_layout"),
-                bind_group_layouts: &[&menu_bind_group_layout],
-                push_constant_ranges: &[],
-            });
+        let menu_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("menu_pipeline_layout"),
+            bind_group_layouts: &[&menu_bind_group_layout],
+            push_constant_ranges: &[],
+        });
 
         let menu_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("menu_pipeline"),
@@ -780,9 +792,7 @@ impl State {
 
         let mut emulator = Emulator::new();
         if let Some(cartridge) = cartridge {
-            if let Err(err) =
-                emulator.load_cartridge_with_boot_rom(cartridge, boot_rom.clone())
-            {
+            if let Err(err) = emulator.load_cartridge_with_boot_rom(cartridge, boot_rom.clone()) {
                 eprintln!("Failed to initialize cartridge: {:?}", err);
             }
         }
@@ -933,8 +943,7 @@ impl State {
         self.menu_visible = !self.menu_visible;
         self.menu.set_has_rom(self.emulator.has_bus());
         if let Some(ref path) = self.rom_path {
-            self.menu
-                .set_rom_path(path.to_string_lossy().to_string());
+            self.menu.set_rom_path(path.to_string_lossy().to_string());
         }
         self.menu.set_status("");
         self.menu.request_redraw();
@@ -954,8 +963,20 @@ impl State {
                         self.menu_cursor = None;
                     }
                 }
+                MenuAction::ShowFilePicker => {
+                    if let Some(path) = Self::show_file_picker() {
+                        self.menu.set_selected_path(&path);
+                    }
+                }
             }
         }
+    }
+
+    fn show_file_picker() -> Option<std::path::PathBuf> {
+        let dialog = FileDialog::new()
+            .add_filter("Game Boy ROM", &["gb", "gbc"])
+            .set_title("Select ROM");
+        dialog.pick_file()
     }
 
     fn handle_menu_load(&mut self, path: String) {
@@ -972,11 +993,11 @@ impl State {
                     .emulator
                     .load_cartridge_with_boot_rom(cartridge, self.boot_rom.clone())
                 {
-                    self.menu
-                        .set_status(format!("Failed to init ROM: {err:?}"));
+                    self.menu.set_status(format!("Failed to init ROM: {err:?}"));
                     return;
                 }
-                self.emulator.set_palette(PALETTES[self.palette_index].colors);
+                self.emulator
+                    .set_palette(PALETTES[self.palette_index].colors);
                 self.rom_bytes = Some(bytes);
                 self.rom_frame_ready = false;
                 self.rom_path = Some(path.clone());
@@ -1282,13 +1303,13 @@ impl State {
         let pos = self.menu_position(position);
         match (self.menu_cursor, pos) {
             (Some(_), None) => {
-                self.menu.dispatch_event(slint::platform::WindowEvent::PointerExited);
+                self.menu
+                    .dispatch_event(slint::platform::WindowEvent::PointerExited);
                 self.menu_cursor = None;
             }
             (_, Some(pos)) => {
-                self.menu.dispatch_event(slint::platform::WindowEvent::PointerMoved {
-                    position: pos,
-                });
+                self.menu
+                    .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: pos });
                 self.menu_cursor = Some(pos);
             }
             (None, None) => {}
@@ -1297,7 +1318,8 @@ impl State {
 
     fn handle_menu_cursor_left(&mut self) {
         if self.menu_cursor.is_some() {
-            self.menu.dispatch_event(slint::platform::WindowEvent::PointerExited);
+            self.menu
+                .dispatch_event(slint::platform::WindowEvent::PointerExited);
             self.menu_cursor = None;
         }
     }
@@ -1331,11 +1353,12 @@ impl State {
         if dx == 0.0 && dy == 0.0 {
             return;
         }
-        self.menu.dispatch_event(slint::platform::WindowEvent::PointerScrolled {
-            position,
-            delta_x: dx,
-            delta_y: dy,
-        });
+        self.menu
+            .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+                position,
+                delta_x: dx,
+                delta_y: dy,
+            });
     }
 
     fn handle_menu_key_event(&mut self, event: &winit::event::KeyEvent, code: Option<KeyCode>) {
@@ -1358,11 +1381,7 @@ impl State {
     fn menu_position(&self, position: PhysicalPosition<f64>) -> Option<slint::LogicalPosition> {
         let x = position.x as f32;
         let y = position.y as f32;
-        if x < 0.0
-            || y < 0.0
-            || x >= self.size.width as f32
-            || y >= self.size.height as f32
-        {
+        if x < 0.0 || y < 0.0 || x >= self.size.width as f32 || y >= self.size.height as f32 {
             return None;
         }
         Some(slint::LogicalPosition { x, y })

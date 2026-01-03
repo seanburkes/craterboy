@@ -9,7 +9,7 @@ use slint::platform::{Platform, PlatformError, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, PhysicalSize, SharedString};
 
 slint::slint! {
-    import { Button, LineEdit } from "std-widgets.slint";
+    import { Button, TextEdit, ScrollView } from "std-widgets.slint";
 
     export component MenuWindow inherits Window {
         in-out property <string> rom_path;
@@ -17,6 +17,7 @@ slint::slint! {
         in property <bool> has_rom;
         callback load_rom();
         callback resume();
+        callback browse_files();
         background: transparent;
 
         Rectangle {
@@ -26,8 +27,8 @@ slint::slint! {
         }
 
         Rectangle {
-            width: min(parent.width * 0.8, 140px);
-            height: 120px;
+            width: min(parent.width * 0.8, 400px);
+            height: min(parent.height * 0.8, 320px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: #141a22;
@@ -36,26 +37,62 @@ slint::slint! {
             border-radius: 8px;
 
             VerticalLayout {
-                padding: 10px;
-                spacing: 8px;
+                padding: 16px;
+                spacing: 12px;
                 alignment: start;
 
                 Text {
                     text: "Paused";
-                    font-size: 16px;
+                    font-size: 18px;
                     color: #f0f2f6;
-                }
-
-                LineEdit {
-                    text <=> root.rom_path;
-                    placeholder-text: "path/to/rom.gb";
+                    font-weight: 700;
                 }
 
                 HorizontalLayout {
-                    spacing: 6px;
+                    spacing: 8px;
+                    alignment: start;
+
+                    Text {
+                        text: "ROM:";
+                        color: #9aa0a6;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        width: 40px;
+                    }
+
+                    Rectangle {
+                        background: #0d1117;
+                        border-radius: 4px;
+                        border-color: #30363d;
+                        border-width: 1px;
+                        height: 28px;
+
+                        Text {
+                            text: root.rom_path;
+                            color: root.rom_path != "" ? #f0f2f6 : #6e7681;
+                            font-size: 11px;
+                            overflow: elide;
+                            x: 8px;
+                            y: parent.height / 2 - self.height / 2;
+                            width: parent.width - 80px;
+                        }
+                    }
+
+                    Button {
+                        text: "Browse...";
+                        clicked => { root.browse_files(); }
+                        width: 80px;
+                        height: 28px;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
 
                     Button {
                         text: "Load ROM";
+                        enabled: root.rom_path != "";
                         clicked => { root.load_rom(); }
                     }
                     Button {
@@ -65,16 +102,28 @@ slint::slint! {
                     }
                 }
 
+                Rectangle {
+                    height: 1px;
+                    background: #30363d;
+                }
+
+                Text {
+                    text: "Tip: Supports .gb and .gbc ROMs";
+                    color: #6e7681;
+                    font-size: 10px;
+                }
+
+                Text {
+                    text: "Esc: menu";
+                    color: #6e7681;
+                    font-size: 9px;
+                }
+
                 Text {
                     text: root.status;
                     visible: root.status != "";
                     color: #ff8f8f;
-                    font-size: 10px;
-                }
-                Text {
-                    text: "Esc: menu";
-                    color: #9aa0a6;
-                    font-size: 9px;
+                    font-size: 11px;
                 }
             }
         }
@@ -85,6 +134,7 @@ slint::slint! {
 pub enum MenuAction {
     LoadRom(String),
     Resume,
+    ShowFilePicker,
 }
 
 struct MenuPlatform {
@@ -149,6 +199,11 @@ impl MenuOverlay {
             actions_resume.borrow_mut().push(MenuAction::Resume);
         });
 
+        let actions_browse = actions.clone();
+        ui.on_browse_files(move || {
+            actions_browse.borrow_mut().push(MenuAction::ShowFilePicker);
+        });
+
         let buffer = vec![PremultipliedRgbaColor::default(); width * height];
         let rgba = vec![0u8; width * height * 4];
 
@@ -195,6 +250,11 @@ impl MenuOverlay {
 
     pub fn set_rom_path(&self, path: impl Into<SharedString>) {
         self.ui.set_rom_path(path.into());
+    }
+
+    pub fn set_selected_path(&self, path: &std::path::Path) {
+        self.ui
+            .set_rom_path(path.to_string_lossy().to_string().into());
     }
 
     pub fn set_status(&self, status: impl Into<SharedString>) {
