@@ -381,14 +381,13 @@ impl WaveChannel {
 
         let freq = self.frequency as u32;
         let divisor = 2048 - freq;
-        let step_rate = FREQ_DIVISOR / divisor;
+        let timer_threshold = divisor * 2;
 
         self.timer = self.timer.wrapping_add(cycles);
 
-        let timer_threshold = (4_194_304 / step_rate) / 2;
         while self.timer >= timer_threshold {
             self.timer -= timer_threshold;
-            self.position = (self.position + 1) & 0x3F;
+            self.position = (self.position + 1) & 0x1F;
         }
 
         let wave_byte = self.wave_ram[(self.position as usize / 2) % WAVE_RAM_SIZE];
@@ -733,8 +732,10 @@ pub struct Apu {
     wave_channel: WaveChannel,
     noise_channel: NoiseChannel,
     sample_cycle_accumulator: f64,
-    samples: VecDeque<i32>,
+    samples: VecDeque<[i32; 2]>,
     current_sample: i32,
+    current_sample_left: i32,
+    current_sample_right: i32,
     master_volume_left: u8,
     master_volume_right: u8,
     nr51: u8,
@@ -753,6 +754,8 @@ impl Apu {
             sample_cycle_accumulator: 0.0,
             samples: VecDeque::new(),
             current_sample: 0,
+            current_sample_left: 0,
+            current_sample_right: 0,
             master_volume_left: 0,
             master_volume_right: 0,
             nr51: 0,
@@ -779,7 +782,8 @@ impl Apu {
             if self.samples.len() >= MAX_SAMPLE_QUEUE {
                 self.samples.pop_front();
             }
-            self.samples.push_back(self.current_sample);
+            self.samples
+                .push_back([self.current_sample_left, self.current_sample_right]);
         }
 
         Ok(())
@@ -850,6 +854,8 @@ impl Apu {
     fn mix_sample(&mut self) {
         if !self.sound_enabled {
             self.current_sample = 0;
+            self.current_sample_left = 0;
+            self.current_sample_right = 0;
             return;
         }
 
@@ -889,8 +895,10 @@ impl Apu {
 
         let left_scaled = left * (self.master_volume_left as i32 + 1);
         let right_scaled = right * (self.master_volume_right as i32 + 1);
-        let mixed = (left_scaled + right_scaled) / 2;
-        self.current_sample = (mixed / 8).clamp(-128, 127);
+        self.current_sample_left = (left_scaled / 8).clamp(-128, 127);
+        self.current_sample_right = (right_scaled / 8).clamp(-128, 127);
+        self.current_sample =
+            ((self.current_sample_left + self.current_sample_right) / 2).clamp(-128, 127);
     }
 
     pub fn samples_per_frame(&self) -> u32 {
@@ -908,6 +916,8 @@ impl Apu {
         self.sample_cycle_accumulator = 0.0;
         self.samples.clear();
         self.current_sample = 0;
+        self.current_sample_left = 0;
+        self.current_sample_right = 0;
         self.master_volume_left = 0;
         self.master_volume_right = 0;
         self.nr51 = 0;
@@ -1093,11 +1103,23 @@ impl Apu {
     }
 
     pub fn take_sample(&mut self) -> i32 {
-        self.samples.pop_front().unwrap_or(0)
+        let (left, right) = self.take_sample_stereo();
+        ((left + right) / 2).clamp(-128, 127)
+    }
+
+    pub fn take_sample_stereo(&mut self) -> (i32, i32) {
+        match self.samples.pop_front() {
+            Some([left, right]) => (left, right),
+            None => (0, 0),
+        }
     }
 
     pub fn sample(&self) -> i32 {
         self.current_sample
+    }
+
+    pub fn sample_stereo(&self) -> (i32, i32) {
+        (self.current_sample_left, self.current_sample_right)
     }
 }
 

@@ -136,8 +136,22 @@ impl Emulator {
             .unwrap_or(0)
     }
 
+    pub fn apu_take_sample_stereo(&mut self) -> (i32, i32) {
+        self.bus
+            .as_mut()
+            .map(|bus| bus.apu_take_sample_stereo())
+            .unwrap_or((0, 0))
+    }
+
     pub fn apu_sample(&self) -> i32 {
         self.bus.as_ref().map(|bus| bus.apu_sample()).unwrap_or(0)
+    }
+
+    pub fn apu_sample_stereo(&self) -> (i32, i32) {
+        self.bus
+            .as_ref()
+            .map(|bus| bus.apu_sample_stereo())
+            .unwrap_or((0, 0))
     }
 
     pub fn apu_pulse_output(&self) -> i32 {

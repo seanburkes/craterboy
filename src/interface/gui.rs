@@ -10,7 +10,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, WindowBuilder};
 
-const EFFECT_SMOOTHING_STRENGTH: f32 = 0.4;
+const EFFECT_SMOOTHING_STRENGTH: f32 = 0.2;
 const EFFECT_OUTLINE_STRENGTH: f32 = 0.8;
 
 use crate::application::app;
@@ -26,7 +26,14 @@ use crate::interface::audio::AudioOutput;
 use gilrs::{Gamepad, Gilrs};
 
 const FRAME_WIDTH_U32: u32 = FRAME_WIDTH as u32;
-const FRAME_HEIGHT_U32: u32 = FRAME_HEIGHT as u32;
+const VISUALIZER_HEIGHT: usize = 32;
+const DISPLAY_HEIGHT: usize = FRAME_HEIGHT + VISUALIZER_HEIGHT;
+const DISPLAY_HEIGHT_U32: u32 = DISPLAY_HEIGHT as u32;
+const VISUALIZER_BARS: usize = 8;
+const VISUALIZER_BG: [u8; 3] = [0x06, 0x08, 0x0B];
+const VISUALIZER_GREEN: [u8; 3] = [0x24, 0xD1, 0x4C];
+const VISUALIZER_YELLOW: [u8; 3] = [0xF2, 0xC9, 0x4C];
+const VISUALIZER_RED: [u8; 3] = [0xE8, 0x4B, 0x4B];
 const TILE_SIZE: usize = 8;
 const TILE_BYTES: usize = 16;
 const TILE_DATA_OFFSET: usize = 0x0000;
@@ -131,7 +138,10 @@ impl EffectUniform {
             mode: effect.mode(),
             _pad0: [0; 3],
             _pad1: [0; 4],
-            texel_size: [1.0 / FRAME_WIDTH_U32 as f32, 1.0 / FRAME_HEIGHT_U32 as f32],
+            texel_size: [
+                1.0 / FRAME_WIDTH_U32 as f32,
+                1.0 / DISPLAY_HEIGHT_U32 as f32,
+            ],
             smoothing_strength: EFFECT_SMOOTHING_STRENGTH,
             outline_strength: EFFECT_OUTLINE_STRENGTH,
         }
@@ -160,7 +170,7 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
         WindowBuilder::new()
             .with_title("craterboy")
             .with_inner_size(PhysicalSize::new(640, 576))
-            .with_min_inner_size(PhysicalSize::new(FRAME_WIDTH_U32, FRAME_HEIGHT_U32))
+            .with_min_inner_size(PhysicalSize::new(FRAME_WIDTH_U32, DISPLAY_HEIGHT_U32))
             .build(&event_loop)
             .expect("window"),
     );
@@ -324,6 +334,7 @@ struct State {
     palette_index: usize,
     effect: ShaderEffect,
     effect_uniform: wgpu::Buffer,
+    visualizer_levels: Vec<f32>,
     #[cfg(feature = "audio")]
     audio: AudioOutput,
     #[cfg(feature = "gamepad")]
@@ -475,7 +486,7 @@ impl State {
             label: Some("framebuffer"),
             size: wgpu::Extent3d {
                 width: FRAME_WIDTH_U32,
-                height: FRAME_HEIGHT_U32,
+                height: DISPLAY_HEIGHT_U32,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -635,6 +646,7 @@ impl State {
             palette_index,
             effect,
             effect_uniform: effect_buffer,
+            visualizer_levels: vec![0.0; VISUALIZER_BARS],
             #[cfg(feature = "audio")]
             audio,
             #[cfg(feature = "gamepad")]
@@ -665,6 +677,7 @@ impl State {
         let _ = self.emulator.step_frame();
         #[cfg(feature = "audio")]
         self.audio.enqueue_emulator_samples(&mut self.emulator);
+        self.update_visualizer();
         if self.emulator.has_bus() {
             return;
         }
@@ -714,6 +727,27 @@ impl State {
 
     fn set_overlay_metric(&mut self, label: &str, value: impl Into<String>) {
         self.overlay.set_metric(label, value);
+    }
+
+    fn update_visualizer(&mut self) {
+        let target = {
+            #[cfg(feature = "audio")]
+            {
+                self.audio.visualizer_bars(VISUALIZER_BARS)
+            }
+            #[cfg(not(feature = "audio"))]
+            {
+                vec![0.0; VISUALIZER_BARS]
+            }
+        };
+        for (level, target) in self.visualizer_levels.iter_mut().zip(target.iter()) {
+            let t = target.clamp(0.0, 1.0);
+            if t > *level {
+                *level = *level * 0.7 + t * 0.3;
+            } else {
+                *level *= 0.88;
+            }
+        }
     }
 
     fn update_effect_uniform(&self) {
@@ -797,10 +831,10 @@ impl State {
         }
 
         let max_scale_w = window_w / FRAME_WIDTH_U32;
-        let max_scale_h = window_h / FRAME_HEIGHT_U32;
+        let max_scale_h = window_h / DISPLAY_HEIGHT_U32;
         let scale = max_scale_w.min(max_scale_h).max(1);
         let target_w = FRAME_WIDTH_U32 * scale;
-        let target_h = FRAME_HEIGHT_U32 * scale;
+        let target_h = DISPLAY_HEIGHT_U32 * scale;
         let x = window_w.saturating_sub(target_w) / 2;
         let y = window_h.saturating_sub(target_h) / 2;
 
@@ -817,8 +851,10 @@ impl State {
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let (mut padded, bytes_per_row) =
-            prepare_framebuffer_upload(self.emulator.framebuffer().as_slice());
+        let (mut padded, bytes_per_row) = prepare_framebuffer_upload(
+            self.emulator.framebuffer().as_slice(),
+            &self.visualizer_levels,
+        );
         self.overlay
             .draw(&mut padded, bytes_per_row, FRAME_WIDTH, FRAME_HEIGHT);
 
@@ -833,11 +869,11 @@ impl State {
             wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
-                rows_per_image: Some(FRAME_HEIGHT_U32),
+                rows_per_image: Some(DISPLAY_HEIGHT_U32),
             },
             wgpu::Extent3d {
                 width: FRAME_WIDTH_U32,
-                height: FRAME_HEIGHT_U32,
+                height: DISPLAY_HEIGHT_U32,
                 depth_or_array_layers: 1,
             },
         );
@@ -898,9 +934,9 @@ impl State {
     }
 }
 
-fn prepare_framebuffer_upload(frame: &[u8]) -> (Vec<u8>, u32) {
+fn prepare_framebuffer_upload(frame: &[u8], bars: &[f32]) -> (Vec<u8>, u32) {
     let width = FRAME_WIDTH;
-    let height = FRAME_HEIGHT;
+    let height = DISPLAY_HEIGHT;
     if frame.len() != FRAME_SIZE {
         return (vec![0u8; width * height * 4], (width * 4) as u32);
     }
@@ -909,6 +945,16 @@ fn prepare_framebuffer_upload(frame: &[u8]) -> (Vec<u8>, u32) {
     let padded = ((unpadded + align - 1) / align) * align;
     let mut data = vec![0u8; padded * height];
     for y in 0..height {
+        let dst = y * padded;
+        for x in 0..width {
+            let dst_px = dst + x * 4;
+            data[dst_px] = VISUALIZER_BG[0];
+            data[dst_px + 1] = VISUALIZER_BG[1];
+            data[dst_px + 2] = VISUALIZER_BG[2];
+            data[dst_px + 3] = 0xFF;
+        }
+    }
+    for y in 0..FRAME_HEIGHT {
         let src = y * width * 3;
         let dst = y * padded;
         for x in 0..width {
@@ -918,6 +964,59 @@ fn prepare_framebuffer_upload(frame: &[u8]) -> (Vec<u8>, u32) {
             data[dst_px + 1] = frame[src_px + 1];
             data[dst_px + 2] = frame[src_px + 2];
             data[dst_px + 3] = 0xFF;
+        }
+    }
+
+    if !bars.is_empty() {
+        let bar_count = bars.len().min(width);
+        let bar_width = width / bar_count;
+        let bar_area_height = VISUALIZER_HEIGHT.saturating_sub(2).max(1);
+        let y_base = FRAME_HEIGHT + VISUALIZER_HEIGHT - 1;
+        for (i, level) in bars.iter().take(bar_count).enumerate() {
+            let level = level.clamp(0.0, 1.0);
+            let bar_height = (level * bar_area_height as f32).round() as usize;
+            if bar_height == 0 || bar_width == 0 {
+                continue;
+            }
+            let x_start = i * bar_width;
+            let x_end = (i + 1) * bar_width;
+            let x_bar_end = x_end.saturating_sub(1);
+            for y in 0..bar_height {
+                let y_pos = y_base.saturating_sub(y + 1);
+                let t = y as f32 / bar_area_height as f32;
+                let (r, g, b) = if t < 0.6 {
+                    let local = t / 0.6;
+                    let r = (VISUALIZER_GREEN[0] as f32 * (1.0 - local)
+                        + VISUALIZER_YELLOW[0] as f32 * local) as u8;
+                    let g = (VISUALIZER_GREEN[1] as f32 * (1.0 - local)
+                        + VISUALIZER_YELLOW[1] as f32 * local) as u8;
+                    let b = (VISUALIZER_GREEN[2] as f32 * (1.0 - local)
+                        + VISUALIZER_YELLOW[2] as f32 * local) as u8;
+                    (r, g, b)
+                } else {
+                    let local = (t - 0.6) / 0.4;
+                    let r = (VISUALIZER_YELLOW[0] as f32 * (1.0 - local)
+                        + VISUALIZER_RED[0] as f32 * local) as u8;
+                    let g = (VISUALIZER_YELLOW[1] as f32 * (1.0 - local)
+                        + VISUALIZER_RED[1] as f32 * local) as u8;
+                    let b = (VISUALIZER_YELLOW[2] as f32 * (1.0 - local)
+                        + VISUALIZER_RED[2] as f32 * local) as u8;
+                    (r, g, b)
+                };
+
+                let line = if y % 2 == 0 { 0.88 } else { 1.0 };
+                let r = (r as f32 * line) as u8;
+                let g = (g as f32 * line) as u8;
+                let b = (b as f32 * line) as u8;
+                let dst = y_pos * padded;
+                for x in x_start..x_bar_end {
+                    let dst_px = dst + x * 4;
+                    data[dst_px] = r;
+                    data[dst_px + 1] = g;
+                    data[dst_px + 2] = b;
+                    data[dst_px + 3] = 0xFF;
+                }
+            }
         }
     }
     (data, padded as u32)

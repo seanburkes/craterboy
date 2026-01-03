@@ -60,7 +60,7 @@ fn smooth_color(uv: vec2<f32>, base: vec4<f32>) -> vec4<f32> {
     let texel = effect.texel_size;
     let grad = sobel(uv, texel);
     let mag = grad.z;
-    if mag < 0.02 {
+    if mag < 0.06 {
         return base;
     }
 
