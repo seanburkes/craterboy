@@ -21,6 +21,10 @@ const REG_NR42: u16 = 0xFF21;
 const REG_NR43: u16 = 0xFF22;
 const REG_NR44: u16 = 0xFF23;
 
+const REG_NR50: u16 = 0xFF24;
+const REG_NR51: u16 = 0xFF25;
+const REG_NR52: u16 = 0xFF26;
+
 const FREQ_DIVISOR: u32 = 131072;
 const NOISE_CLOCK_BASE: u32 = 524288;
 const FRAME_SEQUENCER_CYCLES: u32 = 8192;
@@ -684,6 +688,9 @@ pub struct Apu {
     noise_channel: NoiseChannel,
     sample_ready: bool,
     current_sample: i32,
+    master_volume_left: u8,
+    master_volume_right: u8,
+    sound_enabled: bool,
 }
 
 impl Apu {
@@ -697,6 +704,9 @@ impl Apu {
             noise_channel: NoiseChannel::new(),
             sample_ready: false,
             current_sample: 0,
+            master_volume_left: 7,
+            master_volume_right: 7,
+            sound_enabled: true,
         }
     }
 
@@ -774,15 +784,18 @@ impl Apu {
     }
 
     fn mix_sample(&mut self) {
-        let _left_output = 0;
-        let _right_output = 0;
+        if !self.sound_enabled {
+            self.current_sample = 0;
+            return;
+        }
 
         let pulse_out = self.pulse_channel.output();
         let wave_out = self.wave_channel.output();
         let noise_out = self.noise_channel.output();
 
         let mixed = (pulse_out + wave_out + noise_out) as i32;
-        self.current_sample = mixed.clamp(-128, 127) as i32;
+        let volume_factor = ((self.master_volume_left + self.master_volume_right) as i32 + 2) / 16;
+        self.current_sample = (mixed * volume_factor).clamp(-128, 127);
     }
 
     pub fn samples_per_frame(&self) -> u32 {
@@ -798,6 +811,9 @@ impl Apu {
         self.noise_channel.reset();
         self.sample_ready = false;
         self.current_sample = 0;
+        self.master_volume_left = 7;
+        self.master_volume_right = 7;
+        self.sound_enabled = true;
     }
 
     pub fn read_io(&self, addr: u16) -> u8 {
@@ -807,6 +823,20 @@ impl Apu {
             }
             REG_NR30 | REG_NR31 | REG_NR32 | REG_NR33 | REG_NR34 => self.wave_channel.read_io(addr),
             REG_NR41 | REG_NR42 | REG_NR43 | REG_NR44 => self.noise_channel.read_io(addr),
+            REG_NR50 => ((self.master_volume_left & 0x07) << 4) | (self.master_volume_right & 0x07),
+            REG_NR52 => {
+                let mut value = if self.sound_enabled { 0x80 } else { 0x00 };
+                if self.pulse_channel.enabled {
+                    value |= 0x01;
+                }
+                if self.wave_channel.enabled {
+                    value |= 0x02;
+                }
+                if self.noise_channel.enabled {
+                    value |= 0x08;
+                }
+                value
+            }
             WAVE_RAM_START..=0xFF3F => self.wave_channel.read_wave_ram(addr),
             _ => 0,
         }
@@ -815,13 +845,32 @@ impl Apu {
     pub fn write_io(&mut self, addr: u16, value: u8) {
         match addr {
             REG_NR10 | REG_NR11 | REG_NR12 | REG_NR13 | REG_NR14 => {
-                self.pulse_channel.write_io(addr, value);
+                if self.sound_enabled {
+                    self.pulse_channel.write_io(addr, value);
+                }
             }
             REG_NR30 | REG_NR31 | REG_NR32 | REG_NR33 | REG_NR34 => {
-                self.wave_channel.write_io(addr, value);
+                if self.sound_enabled {
+                    self.wave_channel.write_io(addr, value);
+                }
             }
             REG_NR41 | REG_NR42 | REG_NR43 | REG_NR44 => {
-                self.noise_channel.write_io(addr, value);
+                if self.sound_enabled {
+                    self.noise_channel.write_io(addr, value);
+                }
+            }
+            REG_NR50 => {
+                self.master_volume_left = (value >> 4) & 0x07;
+                self.master_volume_right = value & 0x07;
+            }
+            REG_NR52 => {
+                let was_enabled = self.sound_enabled;
+                self.sound_enabled = value & 0x80 != 0;
+                if was_enabled && !self.sound_enabled {
+                    self.pulse_channel.reset();
+                    self.wave_channel.reset();
+                    self.noise_channel.reset();
+                }
             }
             WAVE_RAM_START..=0xFF3F => {
                 self.wave_channel.write_wave_ram(addr, value);
