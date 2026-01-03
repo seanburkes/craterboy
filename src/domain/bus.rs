@@ -51,6 +51,10 @@ const REG_WY: u16 = 0xFF4A;
 const REG_WX: u16 = 0xFF4B;
 const REG_KEY0: u16 = 0xFF4C;
 const REG_KEY1: u16 = 0xFF4D;
+const REG_BGPI: u16 = 0xFF68;
+const REG_BGPD: u16 = 0xFF69;
+const REG_OBPI: u16 = 0xFF6A;
+const REG_OBPD: u16 = 0xFF6B;
 const IF_VBLANK: u8 = 0x01;
 const IF_STAT: u8 = 0x02;
 const IF_TIMER: u8 = 0x04;
@@ -91,6 +95,12 @@ pub struct Bus {
     interrupt_flag: u8,
     interrupt_enable: u8,
     apu: Apu,
+    bg_palette_index: u8,
+    bg_palette_auto_increment: bool,
+    ob_palette_index: u8,
+    ob_palette_auto_increment: bool,
+    bg_palette_data: [u8; 64],
+    ob_palette_data: [u8; 64],
 }
 
 impl Bus {
@@ -192,6 +202,12 @@ impl Bus {
             interrupt_flag,
             interrupt_enable: 0,
             apu,
+            bg_palette_index: 0,
+            bg_palette_auto_increment: false,
+            ob_palette_index: 0,
+            ob_palette_auto_increment: false,
+            bg_palette_data: [0xFF; 64],
+            ob_palette_data: [0xFF; 64],
         })
     }
 
@@ -213,6 +229,14 @@ impl Bus {
 
     pub fn vram(&self) -> &[u8] {
         &self.vram
+    }
+
+    pub fn bg_palette_data(&self) -> &[u8; 64] {
+        &self.bg_palette_data
+    }
+
+    pub fn ob_palette_data(&self) -> &[u8; 64] {
+        &self.ob_palette_data
     }
 
     pub fn set_joyp_buttons(&mut self, mask: u8) {
@@ -432,6 +456,10 @@ impl Bus {
             REG_DMA => self.dma,
             REG_KEY0 => self.read_key0(),
             REG_KEY1 => self.read_key1(),
+            REG_BGPI => self.read_bgpi(),
+            REG_BGPD => self.read_bgpdata(),
+            REG_OBPI => self.read_obpi(),
+            REG_OBPD => self.read_obpdata(),
             0xFF10..=0xFF14
             | 0xFF16..=0xFF19
             | 0xFF1A..=0xFF1E
@@ -473,6 +501,10 @@ impl Bus {
             REG_KEY1 => {
                 self.speed_switch_pending = value & 0x01 != 0;
             }
+            REG_BGPI => self.write_bgpi(value),
+            REG_BGPD => self.write_bgpdata(value),
+            REG_OBPI => self.write_obpi(value),
+            REG_OBPD => self.write_obpdata(value),
             0xFF10..=0xFF14
             | 0xFF16..=0xFF19
             | 0xFF1A..=0xFF1E
@@ -627,14 +659,66 @@ impl Bus {
         }
         value
     }
+
+    fn read_bgpi(&self) -> u8 {
+        let mut value = self.bg_palette_index;
+        if self.bg_palette_auto_increment {
+            value |= 0x80;
+        }
+        value
+    }
+
+    fn read_bgpdata(&self) -> u8 {
+        let idx = self.bg_palette_index as usize;
+        self.bg_palette_data[idx]
+    }
+
+    fn write_bgpi(&mut self, value: u8) {
+        self.bg_palette_index = value & 0x3F;
+        self.bg_palette_auto_increment = value & 0x80 != 0;
+    }
+
+    fn write_bgpdata(&mut self, value: u8) {
+        let idx = self.bg_palette_index as usize;
+        self.bg_palette_data[idx] = value;
+        if self.bg_palette_auto_increment {
+            self.bg_palette_index = self.bg_palette_index.wrapping_add(1) & 0x3F;
+        }
+    }
+
+    fn read_obpi(&self) -> u8 {
+        let mut value = self.ob_palette_index;
+        if self.ob_palette_auto_increment {
+            value |= 0x80;
+        }
+        value
+    }
+
+    fn read_obpdata(&self) -> u8 {
+        let idx = self.ob_palette_index as usize;
+        self.ob_palette_data[idx]
+    }
+
+    fn write_obpi(&mut self, value: u8) {
+        self.ob_palette_index = value & 0x3F;
+        self.ob_palette_auto_increment = value & 0x80 != 0;
+    }
+
+    fn write_obpdata(&mut self, value: u8) {
+        let idx = self.ob_palette_index as usize;
+        self.ob_palette_data[idx] = value;
+        if self.ob_palette_auto_increment {
+            self.ob_palette_index = self.ob_palette_index.wrapping_add(1) & 0x3F;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BOOT_ROM_SIZE, Bus, DMA_CYCLES, IF_TIMER, REG_BGP, REG_DIV, REG_DMA, REG_IF, REG_JOYP,
-        REG_KEY0, REG_KEY1, REG_LCDC, REG_LY, REG_LYC, REG_OBP0, REG_OBP1, REG_SCX, REG_SCY,
-        REG_STAT, REG_TAC, REG_TIMA, REG_TMA, REG_WX, REG_WY,
+        BOOT_ROM_SIZE, Bus, DMA_CYCLES, IF_TIMER, REG_BGP, REG_BGPD, REG_BGPI, REG_DIV, REG_DMA,
+        REG_IF, REG_JOYP, REG_KEY0, REG_KEY1, REG_LCDC, REG_LY, REG_LYC, REG_OBP0, REG_OBP1,
+        REG_OBPD, REG_OBPI, REG_SCX, REG_SCY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA, REG_WX, REG_WY,
     };
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
@@ -936,5 +1020,83 @@ mod tests {
 
         bus.apply_post_boot_state();
         assert_eq!(bus.read8(REG_KEY0), 0xFF);
+    }
+
+    #[test]
+    fn bus_cgb_bg_palette_write_and_read() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(REG_BGPI, 0x80);
+        assert_eq!(bus.read8(REG_BGPI), 0x80);
+
+        bus.write8(REG_BGPD, 0xAB);
+        assert_eq!(bus.read8(REG_BGPI), 0x81);
+
+        bus.write8(REG_BGPI, 0x00);
+        assert_eq!(bus.read8(REG_BGPI), 0x00);
+        assert_eq!(bus.read8(REG_BGPD), 0xAB);
+
+        bus.write8(REG_BGPI, 0x81);
+        assert_eq!(bus.read8(REG_BGPD), 0xFF);
+    }
+
+    #[test]
+    fn bus_cgb_bg_palette_auto_increment() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(REG_BGPI, 0x80);
+
+        bus.write8(REG_BGPD, 0x11);
+        assert_eq!(bus.read8(REG_BGPI), 0x81);
+        bus.write8(REG_BGPD, 0x22);
+        assert_eq!(bus.read8(REG_BGPI), 0x82);
+    }
+
+    #[test]
+    fn bus_cgb_obj_palette_write_and_read() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(REG_OBPI, 0x00);
+        bus.write8(REG_OBPD, 0xCD);
+
+        bus.write8(REG_OBPI, 0x81);
+        bus.write8(REG_OBPD, 0xEF);
+
+        bus.write8(REG_OBPI, 0x00);
+        assert_eq!(bus.read8(REG_OBPD), 0xCD);
+
+        bus.write8(REG_OBPI, 0x81);
+        assert_eq!(bus.read8(REG_OBPI), 0x81);
+        assert_eq!(bus.read8(REG_OBPD), 0xEF);
+    }
+
+    #[test]
+    fn bus_cgb_palette_data_separate_for_bg_and_obj() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(REG_BGPD, 0x12);
+        bus.write8(REG_OBPD, 0x34);
+
+        bus.write8(REG_BGPI, 0x00);
+        bus.write8(REG_OBPI, 0x00);
+
+        assert_eq!(bus.read8(REG_BGPD), 0x12);
+        assert_eq!(bus.read8(REG_OBPD), 0x34);
     }
 }
