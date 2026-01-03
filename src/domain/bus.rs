@@ -52,6 +52,11 @@ const REG_WX: u16 = 0xFF4B;
 const REG_KEY0: u16 = 0xFF4C;
 const REG_KEY1: u16 = 0xFF4D;
 const REG_VBK: u16 = 0xFF4F;
+const REG_HDMA1: u16 = 0xFF51;
+const REG_HDMA2: u16 = 0xFF52;
+const REG_HDMA3: u16 = 0xFF53;
+const REG_HDMA4: u16 = 0xFF54;
+const REG_HDMA5: u16 = 0xFF55;
 const REG_BGPI: u16 = 0xFF68;
 const REG_BGPD: u16 = 0xFF69;
 const REG_OBPI: u16 = 0xFF6A;
@@ -59,6 +64,15 @@ const REG_OBPD: u16 = 0xFF6B;
 const IF_VBLANK: u8 = 0x01;
 const IF_STAT: u8 = 0x02;
 const IF_TIMER: u8 = 0x04;
+
+const HDMA_BLOCK_SIZE: usize = 0x10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HdmaMode {
+    Inactive,
+    HBlank,
+    General,
+}
 
 #[derive(Debug)]
 pub struct Bus {
@@ -103,6 +117,11 @@ pub struct Bus {
     ob_palette_auto_increment: bool,
     bg_palette_data: [u8; 64],
     ob_palette_data: [u8; 64],
+    hdma_source: u16,
+    hdma_dest: u16,
+    hdma_blocks_remaining: u8,
+    hdma_active: bool,
+    hdma_mode: HdmaMode,
 }
 
 impl Bus {
@@ -211,6 +230,11 @@ impl Bus {
             ob_palette_auto_increment: false,
             bg_palette_data: [0xFF; 64],
             ob_palette_data: [0xFF; 64],
+            hdma_source: 0,
+            hdma_dest: 0,
+            hdma_blocks_remaining: 0,
+            hdma_active: false,
+            hdma_mode: HdmaMode::Inactive,
         })
     }
 
@@ -341,6 +365,7 @@ impl Bus {
         self.step_timer(cycles);
         let _ = self.apu.step(cycles);
         self.step_ppu(cycles);
+        self.step_hdma();
         self.step_dma(cycles);
         self.mbc.tick(cycles);
     }
@@ -484,6 +509,21 @@ impl Bus {
             REG_KEY0 => self.read_key0(),
             REG_KEY1 => self.read_key1(),
             REG_VBK => self.vram_bank | 0xFE,
+            REG_HDMA1 => (self.hdma_source >> 8) as u8,
+            REG_HDMA2 => self.hdma_source as u8,
+            REG_HDMA3 => (self.hdma_dest >> 8) as u8,
+            REG_HDMA4 => self.hdma_dest as u8,
+            REG_HDMA5 => {
+                let mut value = self.hdma_blocks_remaining;
+                if self.hdma_active {
+                    value |= 0x80;
+                }
+                match self.hdma_mode {
+                    HdmaMode::HBlank => value,
+                    HdmaMode::General => value | 0x80,
+                    HdmaMode::Inactive => value,
+                }
+            }
             REG_BGPI => self.read_bgpi(),
             REG_BGPD => self.read_bgpdata(),
             REG_OBPI => self.read_obpi(),
@@ -533,6 +573,62 @@ impl Bus {
             }
             REG_VBK => {
                 self.vram_bank = value & 0x01;
+            }
+            REG_HDMA1 => {
+                if !self.hdma_active {
+                    self.hdma_source = ((value as u16) << 8) | (self.hdma_source & 0x00FF);
+                }
+            }
+            REG_HDMA2 => {
+                if !self.hdma_active {
+                    self.hdma_source = (self.hdma_source & 0xFF00) | ((value as u16) & 0x00F0);
+                }
+            }
+            REG_HDMA3 => {
+                if !self.hdma_active {
+                    self.hdma_dest = ((value as u16) << 8) | (self.hdma_dest & 0x00FF);
+                }
+            }
+            REG_HDMA4 => {
+                if !self.hdma_active {
+                    self.hdma_dest = (self.hdma_dest & 0xFF00) | ((value as u16) & 0x00F0);
+                }
+            }
+            REG_HDMA5 => {
+                if !self.cgb_mode {
+                    return;
+                }
+                let is_gdma = value & 0x80 != 0;
+                let blocks = value & 0x7F;
+
+                if self.hdma_active {
+                    if is_gdma {
+                        return;
+                    }
+                    if blocks >= self.hdma_blocks_remaining {
+                        self.hdma_active = false;
+                        self.hdma_blocks_remaining = 0;
+                        return;
+                    }
+                }
+
+                self.hdma_blocks_remaining = blocks.wrapping_add(1);
+                self.hdma_mode = if is_gdma {
+                    HdmaMode::General
+                } else {
+                    HdmaMode::HBlank
+                };
+
+                if is_gdma {
+                    self.hdma_active = true;
+                    self.perform_hdma_transfer();
+                    self.hdma_active = false;
+                    self.hdma_blocks_remaining = 0;
+                } else if self.ppu_mode == 0 && self.ly < VBLANK_START {
+                    self.hdma_active = true;
+                } else {
+                    self.hdma_active = true;
+                }
             }
             REG_BGPI => self.write_bgpi(value),
             REG_BGPD => self.write_bgpdata(value),
@@ -599,6 +695,72 @@ impl Bus {
             }
             self.dma_active = false;
         }
+    }
+
+    fn perform_hdma_transfer(&mut self) {
+        let mut source = self.hdma_source;
+        let mut dest = self.hdma_dest & 0x1FF0;
+
+        for _ in 0..self.hdma_blocks_remaining {
+            for i in 0..HDMA_BLOCK_SIZE {
+                let byte = self.read8(source.wrapping_add(i as u16));
+                let vram_idx = (dest as usize) % VRAM_SIZE;
+                self.vram[self.vram_bank as usize][vram_idx] = byte;
+                dest = dest.wrapping_add(1);
+            }
+            source = source.wrapping_add(HDMA_BLOCK_SIZE as u16);
+        }
+
+        self.hdma_source = source;
+        self.hdma_dest = dest | 0x8000;
+        self.hdma_blocks_remaining = 0;
+        self.hdma_active = false;
+    }
+
+    fn step_hdma(&mut self) {
+        if !self.hdma_active || self.hdma_mode != HdmaMode::HBlank {
+            return;
+        }
+
+        if self.ly >= VBLANK_START {
+            return;
+        }
+
+        if self.ppu_mode != 0 {
+            return;
+        }
+
+        let cycles_into_hblank = self.ppu_line_cycles;
+        if cycles_into_hblank < 252 {
+            return;
+        }
+
+        let remaining = self.hdma_blocks_remaining;
+        if remaining == 0 {
+            self.hdma_active = false;
+            return;
+        }
+
+        self.execute_hdma_block();
+        self.hdma_blocks_remaining -= 1;
+
+        if self.hdma_blocks_remaining == 0 {
+            self.hdma_active = false;
+        }
+    }
+
+    fn execute_hdma_block(&mut self) {
+        let source = self.hdma_source;
+        let mut dest = self.hdma_dest & 0x1FF0;
+
+        for i in 0..HDMA_BLOCK_SIZE {
+            let byte = self.read8(source.wrapping_add(i as u16));
+            self.vram[self.vram_bank as usize][dest as usize] = byte;
+            dest = dest.wrapping_add(1);
+        }
+
+        self.hdma_source = source.wrapping_add(HDMA_BLOCK_SIZE as u16);
+        self.hdma_dest = dest | 0x8000;
     }
 
     fn step_ppu(&mut self, cycles: u32) {
@@ -749,13 +911,13 @@ impl Bus {
 #[cfg(test)]
 mod tests {
     use super::{
-        BOOT_ROM_SIZE, Bus, DMA_CYCLES, IF_TIMER, REG_BGP, REG_BGPD, REG_BGPI, REG_DIV, REG_DMA,
-        REG_IF, REG_JOYP, REG_KEY0, REG_KEY1, REG_LCDC, REG_LY, REG_LYC, REG_OBP0, REG_OBP1,
-        REG_OBPD, REG_OBPI, REG_SCX, REG_SCY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA, REG_VBK,
-        REG_WX, REG_WY,
+        Bus, BOOT_ROM_SIZE, DMA_CYCLES, IF_TIMER, REG_BGP, REG_BGPD, REG_BGPI, REG_DIV, REG_DMA,
+        REG_HDMA1, REG_HDMA2, REG_HDMA3, REG_HDMA4, REG_HDMA5, REG_IF, REG_JOYP, REG_KEY0,
+        REG_KEY1, REG_LCDC, REG_LY, REG_LYC, REG_OBP0, REG_OBP1, REG_OBPD, REG_OBPI, REG_SCX,
+        REG_SCY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA, REG_VBK, REG_WX, REG_WY,
     };
-    use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
+    use crate::domain::Cartridge;
 
     #[test]
     fn bus_reads_from_selected_rom_bank() {
@@ -1331,5 +1493,162 @@ mod tests {
         assert_eq!(bus.read8(REG_KEY1), 0x00);
         assert!(!bus.is_double_speed());
         assert!(!bus.speed_switch_pending());
+    }
+
+    #[test]
+    fn bus_hdma_gdma_minimal() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+
+        // Set up source data
+        rom[0x0000] = 0xAA;
+        rom[0x0001] = 0xBB;
+        rom[0x0002] = 0xCC;
+
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Source = 0x0000
+        bus.write8(REG_HDMA1, 0x00);
+        bus.write8(REG_HDMA2, 0x00);
+
+        // Dest = 0x8000
+        bus.write8(REG_HDMA3, 0x80);
+        bus.write8(REG_HDMA4, 0x00);
+
+        // Start GDMA: transfer 1 block (16 bytes) - bit 7 = GDMA mode
+        bus.write8(REG_HDMA5, 0x80);
+
+        // Check if data was transferred
+        assert_eq!(bus.read8(0x8000), 0xAA, "First byte should be transferred");
+        assert_eq!(bus.read8(0x8001), 0xBB, "Second byte should be transferred");
+    }
+
+    #[test]
+    fn bus_hdma_gdma_transfers_data() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+
+        // Fill first 256 bytes with test pattern
+        for i in 0..0x100 {
+            rom[i] = i as u8;
+        }
+
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Set source address to 0x0000
+        bus.write8(REG_HDMA1, 0x00);
+        bus.write8(REG_HDMA2, 0x00);
+
+        // Set destination address to 0x8000 (VRAM), must be 0x10 aligned for each block
+        // HDMA destination: high bits in HDMA3, low bits (bits 7-4) in HDMA4
+        // 0x8000 = 0x80 << 8 | 0x00
+        bus.write8(REG_HDMA3, 0x80);
+        bus.write8(REG_HDMA4, 0x00);
+
+        // Start GDMA transfer: 0x8F = GDMA mode (bit 7) + 15 blocks (0x0F)
+        bus.write8(REG_HDMA5, 0x8F);
+
+        // Verify VRAM contains the transferred data
+        for i in 0..0x100 {
+            assert_eq!(
+                bus.read8(0x8000 + i),
+                i as u8,
+                "VRAM[0x{:04X}] should match source",
+                0x8000 + i
+            );
+        }
+    }
+
+    #[test]
+    fn bus_hdma_debug() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Test REG_HDMA1 address
+        assert_eq!(REG_HDMA1, 0xFF51, "REG_HDMA1 should be 0xFF51");
+
+        // Write and read back - single write like original test
+        bus.write8(REG_HDMA1, 0x12);
+        let value = bus.read8(REG_HDMA1);
+        assert_eq!(value, 0x12, "Read 0x{:02X} after writing 0x12", value);
+    }
+
+    #[test]
+    fn bus_hdma_debug_multi() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Write all HDMA registers
+        bus.write8(REG_HDMA1, 0x12);
+        bus.write8(REG_HDMA2, 0x34);
+        bus.write8(REG_HDMA3, 0x56);
+        bus.write8(REG_HDMA4, 0x78);
+
+        // Now read them back
+        let h1 = bus.read8(REG_HDMA1);
+        let h2 = bus.read8(REG_HDMA2);
+        let h3 = bus.read8(REG_HDMA3);
+        let h4 = bus.read8(REG_HDMA4);
+
+        // HDMA2 masks bit 0 to 0, HDMA4 masks lower 4 bits to 0
+        assert_eq!(h1, 0x12, "HDMA1: read 0x{:02X}, expected 0x12", h1);
+        assert_eq!(
+            h2, 0x30,
+            "HDMA2: read 0x{:02X}, expected 0x30 (bit 0 forced to 0)",
+            h2
+        );
+        assert_eq!(h3, 0x56, "HDMA3: read 0x{:02X}, expected 0x56", h3);
+        assert_eq!(
+            h4, 0x70,
+            "HDMA4: read 0x{:02X}, expected 0x70 (lower 4 bits forced to 0)",
+            h4
+        );
+    }
+
+    #[test]
+    fn bus_hdma_no_effect_in_dmg_mode() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x00; // DMG only
+
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(REG_HDMA5, 0x80); // Try to start HDMA in DMG mode
+        assert_eq!(bus.read8(REG_HDMA5), 0x00);
+    }
+
+    #[test]
+    fn bus_hdma_registers_read_write() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(REG_HDMA1, 0x12);
+        bus.write8(REG_HDMA2, 0x34);
+        bus.write8(REG_HDMA3, 0x56);
+        bus.write8(REG_HDMA4, 0x78);
+
+        // HDMA2 only keeps bits 7-1 (bit 0 is always 0), so 0x34 becomes 0x30
+        // HDMA4 only keeps bits 7-4 (lower 4 bits are always 0), so 0x78 becomes 0x70
+        assert_eq!(bus.read8(REG_HDMA1), 0x12);
+        assert_eq!(bus.read8(REG_HDMA2), 0x30);
+        assert_eq!(bus.read8(REG_HDMA3), 0x56);
+        assert_eq!(bus.read8(REG_HDMA4), 0x70);
     }
 }
