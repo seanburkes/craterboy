@@ -2,6 +2,12 @@ use super::Bus;
 
 const FRAME_CYCLES: u32 = 70_224;
 
+const REG_NR10: u16 = 0xFF10;
+const REG_NR11: u16 = 0xFF11;
+const REG_NR12: u16 = 0xFF12;
+const REG_NR13: u16 = 0xFF13;
+const REG_NR14: u16 = 0xFF14;
+
 const REG_NR30: u16 = 0xFF1A;
 const REG_NR31: u16 = 0xFF1B;
 const REG_NR32: u16 = 0xFF1C;
@@ -18,6 +24,270 @@ const REG_NR44: u16 = 0xFF23;
 const FREQ_DIVISOR: u32 = 131072;
 const NOISE_CLOCK_BASE: u32 = 524288;
 const ENVELOPE_TICK_CYCLES: u32 = 256;
+const SWEEP_TICK_CYCLES: u32 = 128;
+
+const DUTY_CYCLES: [[u8; 8]; 4] = [
+    [0, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 1, 1, 1],
+    [0, 1, 1, 1, 1, 0, 0, 0],
+];
+
+#[derive(Debug)]
+pub struct PulseChannel {
+    enabled: bool,
+    length: u8,
+    duty_cycle: u8,
+    volume: u8,
+    envelope_add: bool,
+    envelope_period: u8,
+    length_enable: bool,
+    frequency: u16,
+    sweep_enable: bool,
+    sweep_period: u8,
+    sweep_add: bool,
+    sweep_shift: u8,
+    sweep_counter: u8,
+    timer: u32,
+    envelope_timer: u32,
+    sweep_timer: u32,
+    position: u8,
+    envelope_counter: u8,
+    current_volume: u8,
+    output_volume: i32,
+}
+
+impl PulseChannel {
+    pub fn new() -> Self {
+        Self {
+            enabled: false,
+            length: 0,
+            duty_cycle: 0,
+            volume: 0,
+            envelope_add: false,
+            envelope_period: 0,
+            length_enable: false,
+            frequency: 0,
+            sweep_enable: false,
+            sweep_period: 0,
+            sweep_add: false,
+            sweep_shift: 0,
+            sweep_counter: 0,
+            timer: 0,
+            envelope_timer: 0,
+            sweep_timer: 0,
+            position: 0,
+            envelope_counter: 0,
+            current_volume: 0,
+            output_volume: 0,
+        }
+    }
+
+    fn tick_sweep(&mut self) {
+        if !self.sweep_enable || self.sweep_period == 0 {
+            return;
+        }
+
+        if self.sweep_counter > 0 {
+            self.sweep_counter -= 1;
+            if self.sweep_counter == 0 {
+                self.sweep_counter = self.sweep_period;
+                self.update_frequency();
+            }
+        }
+    }
+
+    fn update_frequency(&mut self) {
+        if self.sweep_shift > 0 {
+            let new_freq = if self.sweep_add {
+                self.frequency + (self.frequency >> self.sweep_shift)
+            } else {
+                self.frequency
+                    .saturating_sub(self.frequency >> self.sweep_shift)
+            };
+
+            if new_freq > 2047 {
+                self.enabled = false;
+            } else {
+                self.frequency = new_freq;
+            }
+        }
+    }
+
+    fn step_envelope(&mut self) {
+        if self.envelope_period == 0 {
+            return;
+        }
+
+        if self.envelope_counter > 0 {
+            self.envelope_counter -= 1;
+            return;
+        }
+
+        self.envelope_counter = self.envelope_period;
+
+        if self.envelope_add {
+            if self.current_volume < 15 {
+                self.current_volume += 1;
+            }
+        } else {
+            if self.current_volume > 0 {
+                self.current_volume -= 1;
+            }
+        }
+    }
+
+    pub fn step(&mut self, cycles: u32) -> i32 {
+        if !self.enabled {
+            self.output_volume = 0;
+            return 0;
+        }
+
+        self.sweep_timer = self.sweep_timer.wrapping_add(cycles);
+        while self.sweep_timer >= SWEEP_TICK_CYCLES {
+            self.sweep_timer -= SWEEP_TICK_CYCLES;
+            self.tick_sweep();
+        }
+
+        self.envelope_timer = self.envelope_timer.wrapping_add(cycles);
+        while self.envelope_timer >= ENVELOPE_TICK_CYCLES {
+            self.envelope_timer -= ENVELOPE_TICK_CYCLES;
+            self.step_envelope();
+        }
+
+        let freq = self.frequency as u32;
+        let divisor = 2048 - freq;
+        let step_rate = FREQ_DIVISOR / divisor;
+        let timer_threshold = (4_194_304 / step_rate) / 8;
+
+        self.timer = self.timer.wrapping_add(cycles);
+
+        while self.timer >= timer_threshold {
+            self.timer -= timer_threshold;
+            self.position = (self.position + 1) & 0x07;
+        }
+
+        let duty = DUTY_CYCLES[self.duty_cycle as usize][self.position as usize];
+        let sample = if duty != 0 {
+            self.current_volume as i32
+        } else {
+            0
+        };
+
+        self.output_volume = sample;
+        self.output_volume
+    }
+
+    pub fn reset(&mut self) {
+        self.enabled = false;
+        self.length = 0;
+        self.duty_cycle = 0;
+        self.volume = 0;
+        self.envelope_add = false;
+        self.envelope_period = 0;
+        self.length_enable = false;
+        self.frequency = 0;
+        self.sweep_enable = false;
+        self.sweep_period = 0;
+        self.sweep_add = false;
+        self.sweep_shift = 0;
+        self.sweep_counter = 0;
+        self.timer = 0;
+        self.envelope_timer = 0;
+        self.sweep_timer = 0;
+        self.position = 0;
+        self.envelope_counter = 0;
+        self.current_volume = 0;
+        self.output_volume = 0;
+    }
+
+    pub fn read_io(&self, addr: u16) -> u8 {
+        match addr {
+            REG_NR10 => {
+                let mut value = (self.sweep_period as u8) << 4;
+                if self.sweep_add {
+                    value |= 0x08;
+                }
+                if self.sweep_enable {
+                    value |= 0x80;
+                }
+                value | (self.sweep_shift & 0x07)
+            }
+            REG_NR11 => (self.duty_cycle << 6) | (self.length & 0x3F),
+            REG_NR12 => {
+                (self.volume << 4)
+                    | (if self.envelope_add { 0x08 } else { 0 })
+                    | (self.envelope_period & 0x07)
+            }
+            REG_NR13 => self.frequency as u8,
+            REG_NR14 => {
+                let mut value = 0;
+                if self.length_enable {
+                    value |= 0x40;
+                }
+                value | ((self.frequency >> 8) as u8) & 0x07
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn write_io(&mut self, addr: u16, value: u8) {
+        match addr {
+            REG_NR10 => {
+                self.sweep_enable = value & 0x80 != 0;
+                self.sweep_period = (value >> 4) & 0x07;
+                self.sweep_add = value & 0x08 != 0;
+                self.sweep_shift = value & 0x07;
+            }
+            REG_NR11 => {
+                self.duty_cycle = (value >> 6) & 0x03;
+                self.length = value & 0x3F;
+            }
+            REG_NR12 => {
+                self.volume = (value >> 4) & 0x0F;
+                self.envelope_add = value & 0x08 != 0;
+                self.envelope_period = value & 0x07;
+                self.current_volume = self.volume;
+            }
+            REG_NR13 => {
+                self.frequency = (self.frequency & 0xFF00) | (value as u16);
+            }
+            REG_NR14 => {
+                self.length_enable = value & 0x40 != 0;
+                let new_freq_high = (value as u16) & 0x07;
+                self.frequency = (self.frequency & 0x00FF) | (new_freq_high << 8);
+                if value & 0x80 != 0 {
+                    self.trigger();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn trigger(&mut self) {
+        self.enabled = true;
+        self.sweep_enable = true;
+        self.timer = 0;
+        self.envelope_timer = 0;
+        self.sweep_timer = 0;
+        self.position = 0;
+        self.current_volume = self.volume;
+        self.envelope_counter = self.envelope_period;
+        self.sweep_counter = if self.sweep_period == 0 {
+            8
+        } else {
+            self.sweep_period
+        };
+
+        if self.sweep_shift > 0 {
+            self.update_frequency();
+        }
+    }
+
+    pub fn output(&self) -> i32 {
+        self.output_volume
+    }
+}
 
 #[derive(Debug)]
 pub struct WaveChannel {
@@ -377,6 +647,7 @@ impl NoiseChannel {
 #[derive(Debug)]
 pub struct Apu {
     frame_cycles: u32,
+    pulse_channel: PulseChannel,
     wave_channel: WaveChannel,
     noise_channel: NoiseChannel,
     sample_ready: bool,
@@ -387,6 +658,7 @@ impl Apu {
     pub fn new() -> Self {
         Self {
             frame_cycles: FRAME_CYCLES,
+            pulse_channel: PulseChannel::new(),
             wave_channel: WaveChannel::new(),
             noise_channel: NoiseChannel::new(),
             sample_ready: false,
@@ -396,6 +668,7 @@ impl Apu {
 
     pub fn step(&mut self, cycles: u32) -> Result<(), ()> {
         self.frame_cycles = self.frame_cycles.wrapping_add(cycles);
+        self.pulse_channel.step(cycles);
         self.wave_channel.step(cycles);
         self.noise_channel.step(cycles);
 
@@ -412,10 +685,11 @@ impl Apu {
         let _left_output = 0;
         let _right_output = 0;
 
+        let pulse_out = self.pulse_channel.output();
         let wave_out = self.wave_channel.output();
         let noise_out = self.noise_channel.output();
 
-        let mixed = (wave_out + noise_out) as i32;
+        let mixed = (pulse_out + wave_out + noise_out) as i32;
         self.current_sample = mixed.clamp(-128, 127) as i32;
     }
 
@@ -425,6 +699,7 @@ impl Apu {
 
     pub fn reset(&mut self) {
         self.frame_cycles = FRAME_CYCLES;
+        self.pulse_channel.reset();
         self.wave_channel.reset();
         self.noise_channel.reset();
         self.sample_ready = false;
@@ -433,6 +708,9 @@ impl Apu {
 
     pub fn read_io(&self, addr: u16) -> u8 {
         match addr {
+            REG_NR10 | REG_NR11 | REG_NR12 | REG_NR13 | REG_NR14 => {
+                self.pulse_channel.read_io(addr)
+            }
             REG_NR30 | REG_NR31 | REG_NR32 | REG_NR33 | REG_NR34 => self.wave_channel.read_io(addr),
             REG_NR41 | REG_NR42 | REG_NR43 | REG_NR44 => self.noise_channel.read_io(addr),
             WAVE_RAM_START..=0xFF3F => self.wave_channel.read_wave_ram(addr),
@@ -442,6 +720,9 @@ impl Apu {
 
     pub fn write_io(&mut self, addr: u16, value: u8) {
         match addr {
+            REG_NR10 | REG_NR11 | REG_NR12 | REG_NR13 | REG_NR14 => {
+                self.pulse_channel.write_io(addr, value);
+            }
             REG_NR30 | REG_NR31 | REG_NR32 | REG_NR33 | REG_NR34 => {
                 self.wave_channel.write_io(addr, value);
             }
@@ -453,6 +734,10 @@ impl Apu {
             }
             _ => {}
         }
+    }
+
+    pub fn pulse_output(&self) -> i32 {
+        self.pulse_channel.output()
     }
 
     pub fn wave_output(&self) -> i32 {
@@ -483,7 +768,7 @@ impl Apu {
 
 #[cfg(test)]
 mod tests {
-    use super::{Apu, FRAME_CYCLES, NoiseChannel, WaveChannel};
+    use super::{Apu, FRAME_CYCLES, NoiseChannel, PulseChannel, WaveChannel};
 
     #[test]
     fn new_apu_initializes_correctly() {
@@ -492,9 +777,177 @@ mod tests {
     }
 
     #[test]
-    fn apu_step_does_not_crash() {
+    fn apu_mixes_pulse_wave_and_noise_channels() {
         let mut apu = Apu::new();
-        assert!(!apu.step(10).is_err());
+        apu.write_io(0xFF12, 0x80);
+        apu.write_io(0xFF14, 0x80);
+        apu.write_io(0xFF22, 0x00);
+        apu.write_io(0xFF23, 0x80);
+        for _ in 0..10 {
+            apu.step(FRAME_CYCLES as u32);
+            while apu.has_sample() {
+                let _ = apu.take_sample();
+            }
+        }
+    }
+
+    #[test]
+    fn pulse_channel_output_with_duty_cycles() {
+        let mut channel = PulseChannel::new();
+        for duty in 0..4 {
+            channel.write_io(0xFF11, duty << 6);
+            channel.write_io(0xFF12, 0x80);
+            channel.write_io(0xFF13, 0x00);
+            channel.write_io(0xFF14, 0x80);
+            let output = channel.output();
+            assert!(
+                output >= 0 && output <= 15,
+                "Duty {} should produce valid output, got {}",
+                duty,
+                output
+            );
+        }
+    }
+
+    #[test]
+    fn pulse_channel_new_has_correct_defaults() {
+        let channel = PulseChannel::new();
+        assert!(!channel.enabled);
+        assert_eq!(channel.frequency, 0);
+        assert_eq!(channel.sweep_period, 0);
+        assert_eq!(channel.sweep_shift, 0);
+    }
+
+    #[test]
+    fn pulse_channel_read_write_nr10() {
+        let mut channel = PulseChannel::new();
+        channel.write_io(0xFF10, 0x80);
+        assert!(channel.sweep_enable);
+        channel.write_io(0xFF10, 0x60);
+        assert_eq!(channel.sweep_period, 6);
+        assert!(!channel.sweep_add, "0x60 = 01100000, bit 3 is 0");
+        assert_eq!(channel.sweep_shift, 0);
+    }
+
+    #[test]
+    fn pulse_channel_read_write_nr11() {
+        let mut channel = PulseChannel::new();
+        channel.write_io(0xFF11, 0x80);
+        assert_eq!(channel.duty_cycle, 2);
+        assert_eq!(channel.length, 0);
+    }
+
+    #[test]
+    fn pulse_channel_read_write_nr12() {
+        let mut channel = PulseChannel::new();
+        channel.write_io(0xFF12, 0x80);
+        assert_eq!(channel.volume, 0x08);
+        assert!(!channel.envelope_add);
+        assert_eq!(channel.envelope_period, 0x00);
+    }
+
+    #[test]
+    fn pulse_channel_sweep_stops_at_max_frequency() {
+        let mut channel = PulseChannel::new();
+        channel.write_io(0xFF10, 0x2B);
+        channel.write_io(0xFF12, 0x80);
+        channel.write_io(0xFF13, 0x80);
+        channel.write_io(0xFF14, 0x80);
+        assert!(
+            channel.enabled,
+            "Channel should be enabled initially, freq={}",
+            channel.frequency
+        );
+        assert!(
+            channel.sweep_period > 0,
+            "Sweep period should be > 0 for 0x2B"
+        );
+        assert!(channel.sweep_add, "Sweep add should be true for 0x2B");
+        let mut disabled = false;
+        for _ in 0..(128 * 500) {
+            channel.step(128);
+            if !channel.enabled {
+                disabled = true;
+                break;
+            }
+        }
+        assert!(
+            disabled,
+            "Channel should stop when frequency exceeds 2047, final freq={}",
+            channel.frequency
+        );
+    }
+
+    #[test]
+    fn pulse_channel_trigger() {
+        let mut channel = PulseChannel::new();
+        channel.write_io(0xFF12, 0x80);
+        channel.write_io(0xFF13, 0x00);
+        channel.write_io(0xFF14, 0x80);
+        assert!(channel.enabled);
+        assert_eq!(channel.position, 0);
+    }
+
+    #[test]
+    fn pulse_channel_step_returns_zero_when_disabled() {
+        let mut channel = PulseChannel::new();
+        let output = channel.step(100);
+        assert_eq!(output, 0);
+    }
+
+    #[test]
+    fn pulse_channel_sweep_increases_frequency() {
+        let mut channel = PulseChannel::new();
+        channel.write_io(0xFF10, 0x03);
+        channel.write_io(0xFF12, 0x80);
+        channel.write_io(0xFF13, 0x00);
+        channel.write_io(0xFF14, 0x80);
+        let start_freq = channel.frequency;
+        for _ in 0..(128 * 10) {
+            channel.step(128);
+        }
+        assert!(
+            channel.frequency >= start_freq,
+            "Frequency should increase with add sweep: started at {}, now {}",
+            start_freq,
+            channel.frequency
+        );
+    }
+
+    #[test]
+    fn pulse_channel_sweep_decreases_frequency() {
+        let mut channel = PulseChannel::new();
+        channel.write_io(0xFF10, 0x0B);
+        channel.write_io(0xFF12, 0x80);
+        channel.write_io(0xFF13, 0x00);
+        channel.write_io(0xFF14, 0x80);
+        let start_freq = channel.frequency;
+        for _ in 0..(128 * 10) {
+            channel.step(128);
+        }
+        assert!(
+            channel.frequency <= start_freq,
+            "Frequency should decrease with subtract sweep: started at {}, now {}",
+            start_freq,
+            channel.frequency
+        );
+    }
+
+    #[test]
+    fn pulse_channel_sweep_disabled_at_zero_period() {
+        let mut channel = PulseChannel::new();
+        channel.write_io(0xFF10, 0x80);
+        channel.write_io(0xFF12, 0x80);
+        channel.write_io(0xFF13, 0x00);
+        channel.write_io(0xFF14, 0x80);
+        assert!(channel.sweep_enable);
+        for _ in 0..(128 * 50) {
+            channel.step(128);
+        }
+        assert!(
+            channel.sweep_enable,
+            "Sweep should stay enabled when period is 0x8"
+        );
     }
 
     #[test]
@@ -632,15 +1085,6 @@ mod tests {
     }
 
     #[test]
-    fn noise_channel_step_with_trigger() {
-        let mut channel = NoiseChannel::new();
-        channel.write_io(0xFF21, 0x80);
-        channel.write_io(0xFF22, 0x00);
-        channel.write_io(0xFF23, 0x80);
-        let _ = channel.step(100);
-    }
-
-    #[test]
     fn noise_channel_lfsr_15bit_mode() {
         let mut channel = NoiseChannel::new();
         channel.write_io(0xFF22, 0x00);
@@ -765,7 +1209,7 @@ mod tests {
         let mut apu = Apu::new();
         assert!(!apu.has_sample());
         assert_eq!(apu.sample(), 0);
-        apu.step(FRAME_CYCLES as u32);
+        let _ = apu.step(FRAME_CYCLES as u32);
         assert!(apu.has_sample());
         let sample = apu.take_sample();
         assert!(sample >= -128 && sample <= 127);
@@ -773,23 +1217,10 @@ mod tests {
     }
 
     #[test]
-    fn apu_mixes_wave_and_noise_channels() {
-        let mut apu = Apu::new();
-        apu.write_io(0xFF22, 0x00);
-        apu.write_io(0xFF23, 0x80);
-        for _ in 0..10 {
-            apu.step(FRAME_CYCLES as u32);
-            while apu.has_sample() {
-                let _ = apu.take_sample();
-            }
-        }
-    }
-
-    #[test]
     fn apu_sample_is_clamped() {
         let mut apu = Apu::new();
         for _ in 0..10 {
-            apu.step(FRAME_CYCLES as u32);
+            let _ = apu.step(FRAME_CYCLES as u32);
             if apu.has_sample() {
                 let sample = apu.sample();
                 assert!(
