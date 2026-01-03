@@ -53,6 +53,17 @@ impl Cartridge {
         self.header.cartridge_type.has_battery()
     }
 
+    pub fn is_cgb(&self) -> bool {
+        matches!(
+            self.header.cgb_flag,
+            super::rom::CgbFlag::CgbSupported | super::rom::CgbFlag::CgbOnly
+        )
+    }
+
+    pub fn is_cgb_only(&self) -> bool {
+        matches!(self.header.cgb_flag, super::rom::CgbFlag::CgbOnly)
+    }
+
     pub fn ram(&self) -> &[u8] {
         &self.ext_ram
     }
@@ -307,5 +318,35 @@ mod tests {
         let mapping = cart.rom_mapping();
 
         assert_eq!(mapping.read(0x8000), 0xFF);
+    }
+
+    #[test]
+    fn cartridge_detects_dmg_only_rom() {
+        let mut bytes = vec![0; ROM_BANK_SIZE];
+        bytes[0x0143] = 0x00; // DMG only flag
+        let cart = Cartridge::from_bytes(bytes).expect("cartridge");
+
+        assert!(!cart.is_cgb());
+        assert!(!cart.is_cgb_only());
+    }
+
+    #[test]
+    fn cartridge_detects_cgb_supported_rom() {
+        let mut bytes = vec![0; ROM_BANK_SIZE];
+        bytes[0x0143] = 0x80; // CGB supported flag
+        let cart = Cartridge::from_bytes(bytes).expect("cartridge");
+
+        assert!(cart.is_cgb());
+        assert!(!cart.is_cgb_only());
+    }
+
+    #[test]
+    fn cartridge_detects_cgb_only_rom() {
+        let mut bytes = vec![0; ROM_BANK_SIZE];
+        bytes[0x0143] = 0xC0; // CGB only flag
+        let cart = Cartridge::from_bytes(bytes).expect("cartridge");
+
+        assert!(cart.is_cgb());
+        assert!(cart.is_cgb_only());
     }
 }

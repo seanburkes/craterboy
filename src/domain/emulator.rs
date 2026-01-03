@@ -79,6 +79,23 @@ impl Emulator {
         }
     }
 
+    pub fn is_cgb(&self) -> bool {
+        self.bus.as_ref().map(|bus| bus.is_cgb()).unwrap_or(false)
+    }
+
+    pub fn speed_switch_pending(&self) -> bool {
+        self.bus
+            .as_ref()
+            .map(|bus| bus.speed_switch_pending())
+            .unwrap_or(false)
+    }
+
+    pub fn perform_speed_switch(&mut self) {
+        if let Some(bus) = self.bus.as_mut() {
+            bus.perform_speed_switch();
+        }
+    }
+
     pub fn step_frame(&mut self) -> Result<u32, CpuError> {
         if let Some(err) = self.cpu_error {
             return Err(err);
@@ -296,5 +313,29 @@ mod tests {
             "Expected ~48kHz, got {}",
             rate
         );
+    }
+
+    #[test]
+    fn emulator_detects_cgb_rom() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut emulator = Emulator::new();
+        emulator.load_cartridge(cartridge).expect("load cartridge");
+
+        assert!(emulator.is_cgb());
+    }
+
+    #[test]
+    fn emulator_detects_dmg_rom() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x00; // DMG only
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut emulator = Emulator::new();
+        emulator.load_cartridge(cartridge).expect("load cartridge");
+
+        assert!(!emulator.is_cgb());
     }
 }

@@ -49,6 +49,7 @@ const REG_OBP0: u16 = 0xFF48;
 const REG_OBP1: u16 = 0xFF49;
 const REG_WY: u16 = 0xFF4A;
 const REG_WX: u16 = 0xFF4B;
+const REG_KEY0: u16 = 0xFF4C;
 const REG_KEY1: u16 = 0xFF4D;
 const IF_VBLANK: u8 = 0x01;
 const IF_STAT: u8 = 0x02;
@@ -86,6 +87,7 @@ pub struct Bus {
     dma_base: u16,
     double_speed: bool,
     speed_switch_pending: bool,
+    cgb_mode: bool,
     interrupt_flag: u8,
     interrupt_enable: u8,
     apu: Apu,
@@ -102,6 +104,7 @@ impl Bus {
     ) -> Result<Self, MbcError> {
         let mbc = Mbc::new(&cartridge)?;
         let boot_rom_enabled = boot_rom.is_some();
+        let is_cgb = cartridge.is_cgb();
 
         let mut io = vec![0; IO_SIZE];
         let mut stat = 0;
@@ -185,6 +188,7 @@ impl Bus {
             dma_base: 0,
             double_speed: false,
             speed_switch_pending: false,
+            cgb_mode: is_cgb,
             interrupt_flag,
             interrupt_enable: 0,
             apu,
@@ -228,6 +232,14 @@ impl Bus {
             self.speed_switch_pending = false;
             self.double_speed = !self.double_speed;
         }
+    }
+
+    pub fn is_cgb(&self) -> bool {
+        self.cgb_mode
+    }
+
+    pub fn set_cgb_mode(&mut self, enabled: bool) {
+        self.cgb_mode = enabled;
     }
 
     pub fn disable_boot_rom(&mut self) {
@@ -391,6 +403,8 @@ impl Bus {
         self.set_io_reg(REG_OBP1, 0xFF);
         self.set_io_reg(REG_WY, 0x00);
         self.set_io_reg(REG_WX, 0x00);
+        self.set_io_reg(REG_KEY0, if self.cgb_mode { 0x01 } else { 0x00 });
+        self.set_io_reg(REG_KEY1, 0x00);
 
         self.update_stat();
     }
@@ -416,6 +430,7 @@ impl Bus {
             REG_LY => self.ly,
             REG_LYC => self.lyc,
             REG_DMA => self.dma,
+            REG_KEY0 => self.read_key0(),
             REG_KEY1 => self.read_key1(),
             0xFF10..=0xFF14
             | 0xFF16..=0xFF19
@@ -454,6 +469,7 @@ impl Bus {
                 self.dma_cycles_remaining = DMA_CYCLES;
                 self.dma_base = (value as u16) << 8;
             }
+            REG_KEY0 => {}
             REG_KEY1 => {
                 self.speed_switch_pending = value & 0x01 != 0;
             }
@@ -603,14 +619,22 @@ impl Bus {
         }
         value
     }
+
+    fn read_key0(&self) -> u8 {
+        let mut value = 0xFE;
+        if self.cgb_mode {
+            value |= 0x01;
+        }
+        value
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         BOOT_ROM_SIZE, Bus, DMA_CYCLES, IF_TIMER, REG_BGP, REG_DIV, REG_DMA, REG_IF, REG_JOYP,
-        REG_KEY1, REG_LCDC, REG_LY, REG_LYC, REG_OBP0, REG_OBP1, REG_SCX, REG_SCY, REG_STAT,
-        REG_TAC, REG_TIMA, REG_TMA, REG_WX, REG_WY,
+        REG_KEY0, REG_KEY1, REG_LCDC, REG_LY, REG_LYC, REG_OBP0, REG_OBP1, REG_SCX, REG_SCY,
+        REG_STAT, REG_TAC, REG_TIMA, REG_TMA, REG_WX, REG_WY,
     };
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
@@ -876,5 +900,41 @@ mod tests {
         bus.step(16);
         assert_eq!(bus.read8(REG_TIMA), 0xAA);
         assert_eq!(bus.read8(REG_IF) & IF_TIMER, IF_TIMER);
+    }
+
+    #[test]
+    fn bus_cgb_mode_from_cartridge() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let bus = Bus::new(cartridge).expect("bus");
+
+        assert!(bus.is_cgb());
+        assert_eq!(bus.read8(REG_KEY0) & 0x01, 0x01);
+    }
+
+    #[test]
+    fn bus_dmg_mode_from_cartridge() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x00; // DMG only
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let bus = Bus::new(cartridge).expect("bus");
+
+        assert!(!bus.is_cgb());
+        assert_eq!(bus.read8(REG_KEY0) & 0x01, 0x00);
+    }
+
+    #[test]
+    fn bus_cgb_post_boot_state_sets_key0() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.apply_post_boot_state();
+        assert_eq!(bus.read8(REG_KEY0), 0xFF);
     }
 }
