@@ -75,6 +75,7 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
     let _ = event_loop.run(move |event, elwt| match event {
         Event::WindowEvent { event, window_id } if window_id == target_window_id => match event {
             WindowEvent::CloseRequested => {
+                #[cfg(feature = "audio")]
                 state.audio.stop();
                 elwt.exit();
             }
@@ -205,6 +206,7 @@ struct State {
     rom_frame_ready: bool,
     input: InputState,
     overlay: Overlay,
+    #[cfg(feature = "audio")]
     audio: AudioOutput,
     #[cfg(feature = "gamepad")]
     gilrs: Option<Gilrs>,
@@ -455,7 +457,10 @@ impl State {
             }
         }
 
+        #[cfg(feature = "audio")]
         let mut audio = AudioOutput::new();
+
+        #[cfg(feature = "audio")]
         audio.start(&mut emulator);
 
         #[cfg(feature = "gamepad")]
@@ -478,6 +483,7 @@ impl State {
             rom_frame_ready: false,
             input: InputState::default(),
             overlay: Overlay::new(),
+            #[cfg(feature = "audio")]
             audio,
             #[cfg(feature = "gamepad")]
             gilrs,

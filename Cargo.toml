@@ -14,6 +14,6 @@ rodio = { version = "0.18", optional = true }
 gilrs = { version = "0.10", optional = true }
 
 [features]
-default = ["gamepad"]
-gamepad = ["gilrs"]
+default = ["audio", "gamepad"]
 audio = ["rodio"]
+gamepad = ["gilrs"]
