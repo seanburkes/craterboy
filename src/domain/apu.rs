@@ -1,6 +1,5 @@
 use super::Bus;
 
-const SAMPLE_RATE: u32 = 4_194_304 / 70_224;
 const FRAME_CYCLES: u32 = 70_224;
 
 const REG_NR30: u16 = 0xFF1A;
@@ -346,6 +345,8 @@ pub struct Apu {
     frame_cycles: u32,
     wave_channel: WaveChannel,
     noise_channel: NoiseChannel,
+    sample_ready: bool,
+    current_sample: i32,
 }
 
 impl Apu {
@@ -354,6 +355,8 @@ impl Apu {
             frame_cycles: FRAME_CYCLES,
             wave_channel: WaveChannel::new(),
             noise_channel: NoiseChannel::new(),
+            sample_ready: false,
+            current_sample: 0,
         }
     }
 
@@ -361,7 +364,25 @@ impl Apu {
         self.frame_cycles = self.frame_cycles.wrapping_add(cycles);
         self.wave_channel.step(cycles);
         self.noise_channel.step(cycles);
+
+        if self.frame_cycles >= FRAME_CYCLES {
+            self.frame_cycles -= FRAME_CYCLES;
+            self.mix_sample();
+            self.sample_ready = true;
+        }
+
         Ok(())
+    }
+
+    fn mix_sample(&mut self) {
+        let _left_output = 0;
+        let _right_output = 0;
+
+        let wave_out = self.wave_channel.output();
+        let noise_out = self.noise_channel.output();
+
+        let mixed = (wave_out + noise_out) as i32;
+        self.current_sample = mixed.clamp(-128, 127) as i32;
     }
 
     pub fn samples_per_frame(&self) -> u32 {
@@ -372,6 +393,8 @@ impl Apu {
         self.frame_cycles = FRAME_CYCLES;
         self.wave_channel.reset();
         self.noise_channel.reset();
+        self.sample_ready = false;
+        self.current_sample = 0;
     }
 
     pub fn read_io(&self, addr: u16) -> u8 {
@@ -404,6 +427,23 @@ impl Apu {
 
     pub fn noise_output(&self) -> i32 {
         self.noise_channel.output()
+    }
+
+    pub fn sample_rate_hz(&self) -> f64 {
+        4_194_304.0 / FRAME_CYCLES as f64
+    }
+
+    pub fn has_sample(&self) -> bool {
+        self.sample_ready
+    }
+
+    pub fn take_sample(&mut self) -> i32 {
+        self.sample_ready = false;
+        self.current_sample
+    }
+
+    pub fn sample(&self) -> i32 {
+        self.current_sample
     }
 }
 
@@ -584,5 +624,58 @@ mod tests {
         channel.step(100000);
         let lfsr = channel.lfsr;
         assert!(lfsr & 0xFF80 == 0, "LFSR should be 7-bit: {:016b}", lfsr);
+    }
+
+    #[test]
+    fn apu_sample_rate_is_59_7275hz() {
+        let apu = Apu::new();
+        let rate = apu.sample_rate_hz();
+        assert!(
+            (rate - 59.7275).abs() < 0.001,
+            "Sample rate should be ~59.7275 Hz, got {}",
+            rate
+        );
+    }
+
+    #[test]
+    fn apu_sample_generated_at_frame_boundary() {
+        let mut apu = Apu::new();
+        assert!(!apu.has_sample());
+        assert_eq!(apu.sample(), 0);
+        apu.step(FRAME_CYCLES as u32);
+        assert!(apu.has_sample());
+        let sample = apu.take_sample();
+        assert!(sample >= -128 && sample <= 127);
+        assert!(!apu.has_sample());
+    }
+
+    #[test]
+    fn apu_mixes_wave_and_noise_channels() {
+        let mut apu = Apu::new();
+        apu.write_io(0xFF22, 0x00);
+        apu.write_io(0xFF23, 0x80);
+        for _ in 0..10 {
+            apu.step(FRAME_CYCLES as u32);
+            while apu.has_sample() {
+                let _ = apu.take_sample();
+            }
+        }
+    }
+
+    #[test]
+    fn apu_sample_is_clamped() {
+        let mut apu = Apu::new();
+        for _ in 0..10 {
+            apu.step(FRAME_CYCLES as u32);
+            if apu.has_sample() {
+                let sample = apu.sample();
+                assert!(
+                    sample >= -128 && sample <= 127,
+                    "Sample {} out of range",
+                    sample
+                );
+                let _ = apu.take_sample();
+            }
+        }
     }
 }
