@@ -1,4 +1,4 @@
-use super::apu::OUTPUT_SAMPLE_RATE_HZ;
+use super::apu::DEFAULT_OUTPUT_SAMPLE_RATE_HZ;
 use super::{Bus, Cartridge, Cpu, CpuError, Framebuffer, MbcError, Ppu};
 
 #[derive(Debug)]
@@ -136,7 +136,13 @@ impl Emulator {
         self.bus
             .as_ref()
             .map(|bus| bus.apu_sample_rate_hz())
-            .unwrap_or(OUTPUT_SAMPLE_RATE_HZ)
+            .unwrap_or(DEFAULT_OUTPUT_SAMPLE_RATE_HZ)
+    }
+
+    pub fn apu_set_sample_rate_hz(&mut self, sample_rate_hz: f64) {
+        if let Some(bus) = self.bus.as_mut() {
+            bus.apu_set_sample_rate_hz(sample_rate_hz);
+        }
     }
 
     pub fn apu_has_sample(&self) -> bool {
@@ -221,7 +227,7 @@ impl Emulator {
 
 #[cfg(test)]
 mod tests {
-    use super::Emulator;
+    use super::{Emulator, DEFAULT_OUTPUT_SAMPLE_RATE_HZ};
     use crate::domain::cartridge::ROM_BANK_SIZE;
     use crate::domain::{Cartridge, FRAME_SIZE};
 
@@ -253,7 +259,7 @@ mod tests {
         let emulator = emulator_with_rom();
         let rate = emulator.apu_sample_rate_hz();
         assert!(
-            (rate - 48_000.0).abs() < 0.1,
+            (rate - DEFAULT_OUTPUT_SAMPLE_RATE_HZ).abs() < 0.1,
             "Expected ~48kHz, got {}",
             rate
         );
@@ -309,7 +315,7 @@ mod tests {
         emulator.apu_reset();
         let rate = emulator.apu_sample_rate_hz();
         assert!(
-            (rate - 48_000.0).abs() < 0.1,
+            (rate - DEFAULT_OUTPUT_SAMPLE_RATE_HZ).abs() < 0.1,
             "Expected ~48kHz, got {}",
             rate
         );

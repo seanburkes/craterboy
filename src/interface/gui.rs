@@ -818,7 +818,7 @@ impl State {
         let mut audio = AudioOutput::new();
 
         #[cfg(feature = "audio")]
-        audio.start(emulator.apu_sample_rate_hz());
+        audio.start(&mut emulator);
 
         #[cfg(feature = "gamepad")]
         let gilrs = Gilrs::new().ok();

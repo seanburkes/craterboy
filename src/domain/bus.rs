@@ -353,6 +353,10 @@ impl Bus {
         self.apu.sample_rate_hz()
     }
 
+    pub fn apu_set_sample_rate_hz(&mut self, sample_rate_hz: f64) {
+        self.apu.set_sample_rate_hz(sample_rate_hz);
+    }
+
     pub fn apu_has_sample(&self) -> bool {
         self.apu.has_sample()
     }

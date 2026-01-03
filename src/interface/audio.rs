@@ -1,17 +1,18 @@
-use crate::domain::Emulator;
-use rodio::{OutputStream, OutputStreamHandle, Sink};
 use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
 
-const AUDIO_SAMPLE_RATE: u32 = 48_000;
-const CHUNK_SIZE: usize = 1024;
+use rodio::cpal::traits::{DeviceTrait, HostTrait};
+use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
+
+use crate::domain::Emulator;
+
+const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 const DEFAULT_VOLUME: f32 = 0.3;
-const MAX_QUEUED_CHUNKS: usize = 6;
-const MAX_BUFFERED_FRAMES: usize = AUDIO_SAMPLE_RATE as usize / 2;
+const TARGET_BUFFER_MS: u32 = 30;
+const MAX_BUFFER_MS: u32 = 60;
+const MIN_BUFFER_FRAMES: usize = 256;
 const VISUALIZER_SAMPLE_WINDOW: usize = 512;
 const VISUALIZER_MIN_FREQ: f32 = 80.0;
 const VISUALIZER_MAX_FREQ: f32 = 8_000.0;
@@ -22,91 +23,66 @@ pub struct AudioOutput {
     sink: Arc<Mutex<Option<Sink>>>,
     running: Arc<AtomicBool>,
     sample_rate: u32,
+    target_buffer_frames: usize,
+    max_buffer_frames: usize,
     samples: Arc<Mutex<VecDeque<[i16; 2]>>>,
     visualizer_samples: Arc<Mutex<VecDeque<i16>>>,
 }
 
 impl AudioOutput {
     pub fn new() -> Self {
+        let target_buffer_frames = buffer_frames_for_ms(DEFAULT_SAMPLE_RATE, TARGET_BUFFER_MS);
+        let max_buffer_frames = buffer_frames_for_ms(DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS);
         Self {
             stream: None,
             stream_handle: None,
             sink: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
-            sample_rate: AUDIO_SAMPLE_RATE,
+            sample_rate: DEFAULT_SAMPLE_RATE,
+            target_buffer_frames: target_buffer_frames.max(MIN_BUFFER_FRAMES),
+            max_buffer_frames: max_buffer_frames.max(MIN_BUFFER_FRAMES),
             samples: Arc::new(Mutex::new(VecDeque::new())),
             visualizer_samples: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
-    pub fn start(&mut self, sample_rate_hz: f64) {
+    pub fn start(&mut self, emulator: &mut Emulator) {
         if self.running.load(Ordering::SeqCst) {
             return;
         }
 
+        let device_rate = rodio::cpal::default_host()
+            .default_output_device()
+            .and_then(|device| device.default_output_config().ok())
+            .map(|config| config.sample_rate().0)
+            .unwrap_or(DEFAULT_SAMPLE_RATE);
+        let sample_rate = if device_rate == 0 {
+            DEFAULT_SAMPLE_RATE
+        } else {
+            device_rate
+        };
+
+        emulator.apu_set_sample_rate_hz(sample_rate as f64);
+
         let (stream, stream_handle) = OutputStream::try_default().ok().unwrap();
         let sink = Sink::try_new(&stream_handle).unwrap();
         sink.set_volume(DEFAULT_VOLUME);
+        sink.append(RingSource::new(self.samples.clone(), sample_rate));
+        sink.play();
 
-        let sample_rate = sample_rate_hz.round() as u32;
-        self.sample_rate = if sample_rate == 0 {
-            AUDIO_SAMPLE_RATE
-        } else {
-            sample_rate
-        };
+        self.sample_rate = sample_rate;
+        self.target_buffer_frames =
+            buffer_frames_for_ms(sample_rate, TARGET_BUFFER_MS).max(MIN_BUFFER_FRAMES);
+        self.max_buffer_frames = buffer_frames_for_ms(sample_rate, MAX_BUFFER_MS)
+            .max(self.target_buffer_frames * 2)
+            .max(MIN_BUFFER_FRAMES);
 
+        self.samples.lock().unwrap().clear();
+        self.visualizer_samples.lock().unwrap().clear();
         self.stream = Some(stream);
         self.stream_handle = Some(stream_handle);
         *self.sink.lock().unwrap() = Some(sink);
         self.running.store(true, Ordering::SeqCst);
-
-        let running = self.running.clone();
-        let sink = self.sink.clone();
-        let samples = self.samples.clone();
-        let sample_rate = self.sample_rate;
-
-        thread::spawn(move || {
-            let mut output_buffer: Vec<i16> = Vec::with_capacity(CHUNK_SIZE * 2);
-            let mut last_frame: [i16; 2] = [0, 0];
-
-            while running.load(Ordering::SeqCst) {
-                output_buffer.clear();
-                {
-                    let mut queue = samples.lock().unwrap();
-                    let count = queue.len().min(CHUNK_SIZE);
-                    for _ in 0..count {
-                        if let Some(frame) = queue.pop_front() {
-                            last_frame = frame;
-                            output_buffer.push(frame[0]);
-                            output_buffer.push(frame[1]);
-                        }
-                    }
-                }
-
-                let filled = output_buffer.len() / 2;
-                if filled < CHUNK_SIZE {
-                    let remaining = CHUNK_SIZE - filled;
-                    for _ in 0..remaining {
-                        output_buffer.push(last_frame[0]);
-                        output_buffer.push(last_frame[1]);
-                    }
-                }
-
-                if let Some(sink_guard) = sink.lock().unwrap().as_ref() {
-                    while sink_guard.len() > MAX_QUEUED_CHUNKS {
-                        thread::sleep(Duration::from_millis(1));
-                        if !running.load(Ordering::SeqCst) {
-                            return;
-                        }
-                    }
-                    sink_guard.append(rodio::buffer::SamplesBuffer::new(
-                        2,
-                        sample_rate,
-                        output_buffer.clone(),
-                    ));
-                }
-            }
-        });
     }
 
     pub fn enqueue_emulator_samples(&self, emulator: &mut Emulator) {
@@ -126,8 +102,8 @@ impl AudioOutput {
             return;
         }
 
-        if drained.len() > MAX_BUFFERED_FRAMES {
-            drained.drain(0..drained.len() - MAX_BUFFERED_FRAMES);
+        if drained.len() > self.max_buffer_frames {
+            drained.drain(0..drained.len() - self.max_buffer_frames);
         }
 
         let mut mono_frames = Vec::with_capacity(drained.len());
@@ -138,10 +114,16 @@ impl AudioOutput {
 
         {
             let mut queue = self.samples.lock().unwrap();
-            while queue.len() + drained.len() > MAX_BUFFERED_FRAMES {
+            while queue.len() + drained.len() > self.max_buffer_frames {
                 queue.pop_front();
             }
             queue.extend(drained);
+            if queue.len() > self.target_buffer_frames {
+                let excess = queue.len().saturating_sub(self.target_buffer_frames);
+                for _ in 0..excess {
+                    queue.pop_front();
+                }
+            }
         }
 
         let mut viz = self.visualizer_samples.lock().unwrap();
@@ -225,6 +207,70 @@ impl AudioOutput {
     }
 }
 
+struct RingSource {
+    samples: Arc<Mutex<VecDeque<[i16; 2]>>>,
+    sample_rate: u32,
+    pending_frame: Option<[i16; 2]>,
+    pending_index: u8,
+}
+
+impl RingSource {
+    fn new(samples: Arc<Mutex<VecDeque<[i16; 2]>>>, sample_rate: u32) -> Self {
+        Self {
+            samples,
+            sample_rate,
+            pending_frame: None,
+            pending_index: 0,
+        }
+    }
+}
+
+impl Iterator for RingSource {
+    type Item = i16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(frame) = self.pending_frame {
+            let sample = if self.pending_index == 0 {
+                self.pending_index = 1;
+                frame[0]
+            } else {
+                self.pending_index = 0;
+                self.pending_frame = None;
+                frame[1]
+            };
+            return Some(sample);
+        }
+
+        let frame = self.samples.lock().unwrap().pop_front();
+        match frame {
+            Some(frame) => {
+                self.pending_frame = Some(frame);
+                self.pending_index = 1;
+                Some(frame[0])
+            }
+            None => Some(0),
+        }
+    }
+}
+
+impl Source for RingSource {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> u16 {
+        2
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<std::time::Duration> {
+        None
+    }
+}
+
 impl Default for AudioOutput {
     fn default() -> Self {
         Self::new()
@@ -251,4 +297,11 @@ fn goertzel(samples: &[f32], freq: f32, sample_rate: f32) -> f32 {
     let real = q1 - q2 * cosine;
     let imag = q2 * sine;
     real * real + imag * imag
+}
+
+fn buffer_frames_for_ms(sample_rate: u32, ms: u32) -> usize {
+    if sample_rate == 0 || ms == 0 {
+        return 0;
+    }
+    ((sample_rate as u64 * ms as u64) / 1_000) as usize
 }

@@ -2,9 +2,8 @@ use std::collections::VecDeque;
 
 const CPU_HZ: f64 = 4_194_304.0;
 const FRAME_CYCLES: u32 = 70_224;
-pub(crate) const OUTPUT_SAMPLE_RATE_HZ: f64 = 48_000.0;
-const CYCLES_PER_SAMPLE: f64 = CPU_HZ / OUTPUT_SAMPLE_RATE_HZ;
-const MAX_SAMPLE_QUEUE: usize = 8_192;
+pub(crate) const DEFAULT_OUTPUT_SAMPLE_RATE_HZ: f64 = 48_000.0;
+const MAX_SAMPLE_QUEUE: usize = 2_048;
 
 const REG_NR10: u16 = 0xFF10;
 const REG_NR11: u16 = 0xFF11;
@@ -35,7 +34,6 @@ const REG_NR51: u16 = 0xFF25;
 const REG_NR52: u16 = 0xFF26;
 
 const FREQ_DIVISOR: u32 = 131072;
-const NOISE_CLOCK_BASE: u32 = 524288;
 const FRAME_SEQUENCER_CYCLES: u32 = 8192;
 
 const DUTY_CYCLES: [[u8; 8]; 4] = [
@@ -611,7 +609,7 @@ impl NoiseChannel {
 
         let divisor = Self::divisor_value(self.divisor_code);
         let shift = self.shift_clock_frequency;
-        let threshold = (NOISE_CLOCK_BASE / (divisor << shift)) / 2;
+        let threshold = divisor << (shift + 4);
 
         self.timer = self.timer.wrapping_add(cycles);
 
@@ -732,6 +730,8 @@ pub struct Apu {
     wave_channel: WaveChannel,
     noise_channel: NoiseChannel,
     sample_cycle_accumulator: f64,
+    sample_rate_hz: f64,
+    cycles_per_sample: f64,
     samples: VecDeque<[i32; 2]>,
     current_sample: i32,
     current_sample_left: i32,
@@ -752,6 +752,8 @@ impl Apu {
             wave_channel: WaveChannel::new(),
             noise_channel: NoiseChannel::new(),
             sample_cycle_accumulator: 0.0,
+            sample_rate_hz: DEFAULT_OUTPUT_SAMPLE_RATE_HZ,
+            cycles_per_sample: CPU_HZ / DEFAULT_OUTPUT_SAMPLE_RATE_HZ,
             samples: VecDeque::new(),
             current_sample: 0,
             current_sample_left: 0,
@@ -776,8 +778,8 @@ impl Apu {
         self.noise_channel.step(cycles);
 
         self.sample_cycle_accumulator += cycles as f64;
-        while self.sample_cycle_accumulator >= CYCLES_PER_SAMPLE {
-            self.sample_cycle_accumulator -= CYCLES_PER_SAMPLE;
+        while self.sample_cycle_accumulator >= self.cycles_per_sample {
+            self.sample_cycle_accumulator -= self.cycles_per_sample;
             self.mix_sample();
             if self.samples.len() >= MAX_SAMPLE_QUEUE {
                 self.samples.pop_front();
@@ -797,41 +799,14 @@ impl Apu {
                 self.wave_channel.tick_length();
                 self.noise_channel.tick_length();
             }
-            1 => {
+            2 | 6 => {
+                self.pulse_channel.tick_length();
+                self.pulse_channel2.tick_length();
+                self.wave_channel.tick_length();
+                self.noise_channel.tick_length();
                 self.pulse_channel.tick_sweep();
-                self.pulse_channel.tick_length();
-                self.pulse_channel2.tick_length();
-                self.wave_channel.tick_length();
-                self.noise_channel.tick_length();
-            }
-            2 => {
-                self.pulse_channel.tick_length();
-                self.pulse_channel2.tick_length();
-                self.wave_channel.tick_length();
-                self.noise_channel.tick_length();
-            }
-            3 => {
-                self.pulse_channel.tick_envelope();
-                self.pulse_channel2.tick_envelope();
-                self.pulse_channel.tick_length();
-                self.pulse_channel2.tick_length();
-                self.wave_channel.tick_length();
-                self.noise_channel.tick_length();
             }
             4 => {
-                self.pulse_channel.tick_length();
-                self.pulse_channel2.tick_length();
-                self.wave_channel.tick_length();
-                self.noise_channel.tick_length();
-            }
-            5 => {
-                self.pulse_channel.tick_sweep();
-                self.pulse_channel.tick_length();
-                self.pulse_channel2.tick_length();
-                self.wave_channel.tick_length();
-                self.noise_channel.tick_length();
-            }
-            6 => {
                 self.pulse_channel.tick_length();
                 self.pulse_channel2.tick_length();
                 self.wave_channel.tick_length();
@@ -840,10 +815,7 @@ impl Apu {
             7 => {
                 self.pulse_channel.tick_envelope();
                 self.pulse_channel2.tick_envelope();
-                self.pulse_channel.tick_length();
-                self.pulse_channel2.tick_length();
-                self.wave_channel.tick_length();
-                self.noise_channel.tick_length();
+                self.noise_channel.tick_envelope();
             }
             _ => {}
         }
@@ -903,7 +875,7 @@ impl Apu {
 
     pub fn samples_per_frame(&self) -> u32 {
         let frame_rate = CPU_HZ / FRAME_CYCLES as f64;
-        (OUTPUT_SAMPLE_RATE_HZ / frame_rate).round() as u32
+        (self.sample_rate_hz / frame_rate).round() as u32
     }
 
     fn reset_state(&mut self) {
@@ -1095,7 +1067,23 @@ impl Apu {
     }
 
     pub fn sample_rate_hz(&self) -> f64 {
-        OUTPUT_SAMPLE_RATE_HZ
+        self.sample_rate_hz
+    }
+
+    pub fn set_sample_rate_hz(&mut self, sample_rate_hz: f64) {
+        if !sample_rate_hz.is_finite() || sample_rate_hz <= 0.0 {
+            return;
+        }
+        if (self.sample_rate_hz - sample_rate_hz).abs() < f64::EPSILON {
+            return;
+        }
+        self.sample_rate_hz = sample_rate_hz;
+        self.cycles_per_sample = CPU_HZ / sample_rate_hz;
+        self.sample_cycle_accumulator = 0.0;
+        self.samples.clear();
+        self.current_sample = 0;
+        self.current_sample_left = 0;
+        self.current_sample_right = 0;
     }
 
     pub fn has_sample(&self) -> bool {
@@ -1126,8 +1114,8 @@ impl Apu {
 #[cfg(test)]
 mod tests {
     use super::{
-        Apu, CPU_HZ, CYCLES_PER_SAMPLE, FRAME_CYCLES, NoiseChannel, OUTPUT_SAMPLE_RATE_HZ,
-        PulseChannel, WaveChannel,
+        Apu, CPU_HZ, DEFAULT_OUTPUT_SAMPLE_RATE_HZ, FRAME_CYCLES, NoiseChannel, PulseChannel,
+        WaveChannel,
     };
 
     #[test]
@@ -1569,7 +1557,7 @@ mod tests {
         let apu = Apu::new();
         let rate = apu.sample_rate_hz();
         assert!(
-            (rate - OUTPUT_SAMPLE_RATE_HZ).abs() < 0.1,
+            (rate - DEFAULT_OUTPUT_SAMPLE_RATE_HZ).abs() < 0.1,
             "Sample rate should be ~48kHz, got {}",
             rate
         );
@@ -1580,7 +1568,7 @@ mod tests {
         let mut apu = Apu::new();
         assert!(!apu.has_sample());
         assert_eq!(apu.sample(), 0);
-        let cycles_per_sample = CYCLES_PER_SAMPLE.ceil() as u32;
+        let cycles_per_sample = (CPU_HZ / apu.sample_rate_hz()).ceil() as u32;
         let _ = apu.step(cycles_per_sample);
         assert!(apu.has_sample());
         let sample = apu.take_sample();
@@ -1591,7 +1579,7 @@ mod tests {
     #[test]
     fn apu_sample_is_clamped() {
         let mut apu = Apu::new();
-        let cycles_per_sample = CYCLES_PER_SAMPLE.ceil() as u32;
+        let cycles_per_sample = (CPU_HZ / apu.sample_rate_hz()).ceil() as u32;
         for _ in 0..10 {
             let _ = apu.step(cycles_per_sample);
             if apu.has_sample() {
