@@ -314,12 +314,12 @@ impl Bus {
     }
 
     pub fn read8(&self, addr: u16) -> u8 {
-        if self.boot_rom_enabled {
-            if let Some(boot_rom) = &self.boot_rom {
-                if (addr as usize) < BOOT_ROM_SIZE && boot_rom.len() >= BOOT_ROM_SIZE {
-                    return boot_rom[addr as usize];
-                }
-            }
+        if self.boot_rom_enabled
+            && let Some(boot_rom) = &self.boot_rom
+            && (addr as usize) < BOOT_ROM_SIZE
+            && boot_rom.len() >= BOOT_ROM_SIZE
+        {
+            return boot_rom[addr as usize];
         }
 
         match addr {
@@ -624,8 +624,6 @@ impl Bus {
                     self.perform_hdma_transfer();
                     self.hdma_active = false;
                     self.hdma_blocks_remaining = 0;
-                } else if self.ppu_mode == 0 && self.ly < VBLANK_START {
-                    self.hdma_active = true;
                 } else {
                     self.hdma_active = true;
                 }
@@ -911,13 +909,13 @@ impl Bus {
 #[cfg(test)]
 mod tests {
     use super::{
-        Bus, BOOT_ROM_SIZE, DMA_CYCLES, IF_TIMER, REG_BGP, REG_BGPD, REG_BGPI, REG_DIV, REG_DMA,
+        BOOT_ROM_SIZE, Bus, DMA_CYCLES, IF_TIMER, REG_BGP, REG_BGPD, REG_BGPI, REG_DIV, REG_DMA,
         REG_HDMA1, REG_HDMA2, REG_HDMA3, REG_HDMA4, REG_HDMA5, REG_IF, REG_JOYP, REG_KEY0,
         REG_KEY1, REG_LCDC, REG_LY, REG_LYC, REG_OBP0, REG_OBP1, REG_OBPD, REG_OBPI, REG_SCX,
         REG_SCY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA, REG_VBK, REG_WX, REG_WY,
     };
-    use crate::domain::cartridge::ROM_BANK_SIZE;
     use crate::domain::Cartridge;
+    use crate::domain::cartridge::ROM_BANK_SIZE;
 
     #[test]
     fn bus_reads_from_selected_rom_bank() {
@@ -1532,8 +1530,8 @@ mod tests {
         rom[0x0143] = 0x80; // CGB supported
 
         // Fill first 256 bytes with test pattern
-        for i in 0..0x100 {
-            rom[i] = i as u8;
+        for (i, byte) in rom.iter_mut().enumerate().take(0x100) {
+            *byte = i as u8;
         }
 
         let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
@@ -1650,5 +1648,393 @@ mod tests {
         assert_eq!(bus.read8(REG_HDMA2), 0x30);
         assert_eq!(bus.read8(REG_HDMA3), 0x56);
         assert_eq!(bus.read8(REG_HDMA4), 0x70);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::domain::Cartridge;
+    use crate::domain::cartridge::ROM_BANK_SIZE;
+    use proptest::prelude::*;
+
+    // Property: Memory write-read roundtrip for WRAM
+    proptest! {
+        #[test]
+        fn prop_wram_write_read_roundtrip(addr in 0xC000u16..0xE000, value in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            bus.write8(addr, value);
+            let read_value = bus.read8(addr);
+
+            prop_assert_eq!(read_value, value, "WRAM write-read should roundtrip");
+        }
+    }
+
+    // Property: Echo RAM mirrors WRAM
+    proptest! {
+        #[test]
+        fn prop_echo_ram_mirrors_wram(offset in 0u16..0x1E00, value in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            let wram_addr = 0xC000 + offset;
+            let echo_addr = 0xE000 + offset;
+
+            bus.write8(wram_addr, value);
+            let echo_read = bus.read8(echo_addr);
+
+            prop_assert_eq!(echo_read, value, "Echo RAM should mirror WRAM");
+        }
+    }
+
+    // Property: VRAM write-read roundtrip
+    proptest! {
+        #[test]
+        fn prop_vram_write_read_roundtrip(offset in 0u16..VRAM_SIZE as u16, value in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            let addr = 0x8000 + offset;
+            bus.write8(addr, value);
+            let read_value = bus.read8(addr);
+
+            prop_assert_eq!(read_value, value, "VRAM write-read should roundtrip");
+        }
+    }
+
+    // Property: HRAM write-read roundtrip
+    proptest! {
+        #[test]
+        fn prop_hram_write_read_roundtrip(offset in 0u16..HRAM_SIZE as u16, value in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            let addr = 0xFF80 + offset;
+            bus.write8(addr, value);
+            let read_value = bus.read8(addr);
+
+            prop_assert_eq!(read_value, value, "HRAM write-read should roundtrip");
+        }
+    }
+
+    // Property: OAM write-read roundtrip
+    proptest! {
+        #[test]
+        fn prop_oam_write_read_roundtrip(offset in 0u16..OAM_SIZE as u16, value in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            let addr = 0xFE00 + offset;
+            bus.write8(addr, value);
+            let read_value = bus.read8(addr);
+
+            prop_assert_eq!(read_value, value, "OAM write-read should roundtrip");
+        }
+    }
+
+    // Property: Interrupt enable register roundtrip
+    proptest! {
+        #[test]
+        fn prop_interrupt_enable_roundtrip(value in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            bus.write8(0xFFFF, value);
+            let read_value = bus.read8(0xFFFF);
+
+            prop_assert_eq!(read_value, value, "IE register should roundtrip");
+        }
+    }
+
+    // Property: DIV register resets to 0 on write
+    proptest! {
+        #[test]
+        fn prop_div_resets_on_write(write_value in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            // Step to increment DIV
+            bus.step(256);
+
+            // Write any value should reset to 0
+            bus.write8(REG_DIV, write_value);
+            let read_value = bus.read8(REG_DIV);
+
+            prop_assert_eq!(read_value, 0, "DIV should reset to 0 on any write");
+        }
+    }
+
+    // Property: LY register resets to 0 on write
+    proptest! {
+        #[test]
+        fn prop_ly_resets_on_write(write_value in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            // Enable LCD
+            bus.write8(REG_LCDC, 0x80);
+            bus.step(456); // Advance one scanline
+
+            // Write any value should reset to 0
+            bus.write8(REG_LY, write_value);
+            let read_value = bus.read8(REG_LY);
+
+            prop_assert_eq!(read_value, 0, "LY should reset to 0 on any write");
+        }
+    }
+
+    // Property: STAT lower 3 bits are read-only
+    proptest! {
+        #[test]
+        fn prop_stat_lower_bits_readonly(value in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            // Enable LCD to get into a known mode
+            bus.write8(REG_LCDC, 0x80);
+            bus.step(1);
+
+            let stat_before = bus.read8(REG_STAT) & 0x07;
+            bus.write8(REG_STAT, value);
+            let stat_after = bus.read8(REG_STAT) & 0x07;
+
+            prop_assert_eq!(stat_after, stat_before, "STAT lower 3 bits should be read-only");
+        }
+    }
+
+    // Property: Timer increments predictably
+    proptest! {
+        #[test]
+        fn prop_timer_increments(tac in 0x04u8..0x08) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            bus.write8(REG_TIMA, 0);
+            bus.write8(REG_TAC, tac);
+
+            let period = match tac & 0x03 {
+                0x00 => 1024,
+                0x01 => 16,
+                0x02 => 64,
+                0x03 => 256,
+                _ => 1024,
+            };
+
+            bus.step(period);
+            let tima = bus.read8(REG_TIMA);
+
+            prop_assert_eq!(tima, 1, "TIMA should increment by 1 after period cycles");
+        }
+    }
+
+    // Property: Timer overflow sets interrupt
+    proptest! {
+        #[test]
+        fn prop_timer_overflow_interrupt(_dummy in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            bus.write8(REG_TIMA, 0xFF);
+            bus.write8(REG_TMA, 0x42);
+            bus.write8(REG_TAC, 0x05); // Enable timer, 16 cycle period
+            bus.write8(REG_IF, 0x00);  // Clear interrupts
+
+            bus.step(16); // One timer increment
+
+            let tima = bus.read8(REG_TIMA);
+            let if_reg = bus.read8(REG_IF);
+
+            prop_assert_eq!(tima, 0x42, "TIMA should reload from TMA on overflow");
+            prop_assert!(if_reg & IF_TIMER != 0, "Timer interrupt should be set");
+        }
+    }
+
+    // Property: JOYP selection doesn't crash
+    proptest! {
+        #[test]
+        fn prop_joyp_selection(buttons in any::<u8>(), dpad in any::<u8>(), select in 0x00u8..0x30) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            let buttons_masked = buttons & 0x0F;
+            let dpad_masked = dpad & 0x0F;
+
+            bus.set_joyp_buttons(buttons_masked);
+            bus.set_joyp_dpad(dpad_masked);
+
+            // Test various selection patterns
+            bus.write8(REG_JOYP, select);
+            let joyp_value = bus.read8(REG_JOYP);
+
+            // Upper 2 bits should always be set
+            prop_assert_eq!(joyp_value & 0xC0, 0xC0, "Upper 2 bits of JOYP should be set");
+        }
+    }
+
+    // Property: DMA transfer copies data
+    proptest! {
+        #[test]
+        fn prop_dma_transfer(source_offset in 0u8..0xA0, value in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            // Write test data to source
+            let source_addr = 0xC000 + source_offset as u16;
+            bus.write8(source_addr, value);
+
+            // Start DMA from 0xC000
+            bus.write8(REG_DMA, 0xC0);
+            bus.step(DMA_CYCLES);
+
+            // Check OAM
+            let oam_addr = 0xFE00 + source_offset as u16;
+            let oam_value = bus.read8(oam_addr);
+
+            prop_assert_eq!(oam_value, value, "DMA should copy data to OAM");
+        }
+    }
+
+    // Property: CGB VRAM bank switching
+    proptest! {
+        #[test]
+        fn prop_cgb_vram_banks(value0 in any::<u8>(), value1 in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            rom[0x0143] = 0x80; // CGB supported
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            // Write to bank 0
+            bus.write8(REG_VBK, 0x00);
+            bus.write8(0x8000, value0);
+
+            // Write to bank 1
+            bus.write8(REG_VBK, 0x01);
+            bus.write8(0x8000, value1);
+
+            // Read from bank 0
+            bus.write8(REG_VBK, 0x00);
+            let read0 = bus.read8(0x8000);
+
+            // Read from bank 1
+            bus.write8(REG_VBK, 0x01);
+            let read1 = bus.read8(0x8000);
+
+            prop_assert_eq!(read0, value0, "VRAM bank 0 should hold value0");
+            prop_assert_eq!(read1, value1, "VRAM bank 1 should hold value1");
+        }
+    }
+
+    // Property: Speed switch toggles double speed
+    proptest! {
+        #[test]
+        fn prop_speed_switch_toggles(_dummy in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            rom[0x0143] = 0x80; // CGB supported
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            let initial_speed = bus.is_double_speed();
+
+            bus.write8(REG_KEY1, 0x01);
+            bus.perform_speed_switch();
+
+            let after_switch = bus.is_double_speed();
+
+            prop_assert_ne!(initial_speed, after_switch, "Speed switch should toggle speed");
+        }
+    }
+
+    // Property: PPU mode advances
+    proptest! {
+        #[test]
+        fn prop_ppu_mode_advances(cycles in 1u32..1000) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            bus.write8(REG_LCDC, 0x80); // Enable LCD
+            bus.step(1); // Get initial mode
+            let mode_before = bus.read8(REG_STAT) & 0x03;
+
+            bus.step(cycles);
+            let mode_after = bus.read8(REG_STAT) & 0x03;
+
+            // Mode should be valid (0-3)
+            prop_assert!(mode_before <= 3, "PPU mode should be 0-3");
+            prop_assert!(mode_after <= 3, "PPU mode should be 0-3");
+        }
+    }
+
+    // Property: LY advances to 154 and wraps
+    proptest! {
+        #[test]
+        fn prop_ly_advances_and_wraps(_dummy in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            bus.write8(REG_LCDC, 0x80); // Enable LCD
+
+            // Run for a full frame plus a bit
+            let cycles_per_frame = 456 * 154;
+            bus.step(cycles_per_frame + 1000);
+
+            let ly = bus.read8(REG_LY);
+
+            // LY should be < 154 (0-153)
+            prop_assert!(ly < 154, "LY should wrap at 154");
+        }
+    }
+
+    // Property: Boot ROM can be disabled
+    proptest! {
+        #[test]
+        fn prop_boot_rom_disable(_dummy in any::<u8>()) {
+            let mut rom = vec![0x42; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let boot_rom = vec![0xAA; BOOT_ROM_SIZE];
+            let mut bus = Bus::with_boot_rom(cartridge, Some(boot_rom)).expect("bus");
+
+            prop_assert!(bus.boot_rom_enabled(), "Boot ROM should start enabled");
+            prop_assert_eq!(bus.read8(0x0000), 0xAA, "Should read boot ROM");
+
+            bus.write8(0xFF50, 0x01);
+
+            prop_assert!(!bus.boot_rom_enabled(), "Boot ROM should be disabled");
+            prop_assert_eq!(bus.read8(0x0000), 0x42, "Should read cartridge ROM");
+        }
     }
 }

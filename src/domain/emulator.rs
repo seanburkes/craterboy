@@ -11,6 +11,12 @@ pub struct Emulator {
     ppu: Ppu,
 }
 
+impl Default for Emulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Emulator {
     pub fn new() -> Self {
         Self {
@@ -280,7 +286,7 @@ mod tests {
         emulator.apu_step(cycles_per_sample);
         assert!(emulator.apu_has_sample());
         let sample = emulator.apu_take_sample();
-        assert!(sample >= -128 && sample <= 127);
+        assert!((-128..=127).contains(&sample));
         assert!(!emulator.apu_has_sample());
     }
 
@@ -301,10 +307,10 @@ mod tests {
         let pulse2 = emulator.apu_pulse2_output();
         let wave = emulator.apu_wave_output();
         let noise = emulator.apu_noise_output();
-        assert!(pulse >= 0 && pulse <= 15);
-        assert!(pulse2 >= 0 && pulse2 <= 15);
-        assert!(wave >= 0 && wave <= 3);
-        assert!(noise >= -15 && noise <= 15);
+        assert!((0..=15).contains(&pulse));
+        assert!((0..=15).contains(&pulse2));
+        assert!((0..=3).contains(&wave));
+        assert!((-15..=15).contains(&noise));
     }
 
     #[test]

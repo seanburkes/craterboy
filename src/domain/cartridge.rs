@@ -124,7 +124,7 @@ impl<'a> RomBankView<'a> {
         if self.bytes.is_empty() {
             0
         } else {
-            (self.bytes.len() + ROM_BANK_SIZE - 1) / ROM_BANK_SIZE
+            self.bytes.len().div_ceil(ROM_BANK_SIZE)
         }
     }
 
@@ -227,7 +227,7 @@ fn bank_count_from_len(len: usize) -> usize {
     if len == 0 {
         0
     } else {
-        (len + ROM_BANK_SIZE - 1) / ROM_BANK_SIZE
+        len.div_ceil(ROM_BANK_SIZE)
     }
 }
 

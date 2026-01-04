@@ -67,6 +67,12 @@ pub struct PulseChannel {
     output_volume: i32,
 }
 
+impl Default for PulseChannel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PulseChannel {
     pub fn new() -> Self {
         Self::new_with_sweep(true)
@@ -158,10 +164,8 @@ impl PulseChannel {
             if self.current_volume < 15 {
                 self.current_volume += 1;
             }
-        } else {
-            if self.current_volume > 0 {
-                self.current_volume -= 1;
-            }
+        } else if self.current_volume > 0 {
+            self.current_volume -= 1;
         }
     }
 
@@ -279,7 +283,7 @@ impl PulseChannel {
     pub fn read_io(&self, addr: u16) -> u8 {
         match addr {
             REG_NR10 => {
-                let mut value = (self.sweep_period as u8) << 4;
+                let mut value = self.sweep_period << 4;
                 if self.sweep_add {
                     value |= 0x08;
                 }
@@ -354,6 +358,12 @@ pub struct WaveChannel {
     output_volume: i32,
 }
 
+impl Default for WaveChannel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WaveChannel {
     pub fn new() -> Self {
         Self {
@@ -403,7 +413,7 @@ impl WaveChannel {
             _ => 0,
         };
 
-        self.output_volume = ((sample as i32) * volume) as i32 / 4;
+        self.output_volume = ((sample as i32) * volume) / 4;
         self.output_volume
     }
 
@@ -530,6 +540,12 @@ pub struct NoiseChannel {
     output_volume: i32,
 }
 
+impl Default for NoiseChannel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NoiseChannel {
     pub fn new() -> Self {
         Self {
@@ -581,10 +597,8 @@ impl NoiseChannel {
             if self.current_volume < 15 {
                 self.current_volume += 1;
             }
-        } else {
-            if self.current_volume > 0 {
-                self.current_volume -= 1;
-            }
+        } else if self.current_volume > 0 {
+            self.current_volume -= 1;
         }
     }
 
@@ -740,6 +754,12 @@ pub struct Apu {
     master_volume_right: u8,
     nr51: u8,
     sound_enabled: bool,
+}
+
+impl Default for Apu {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Apu {
@@ -1135,7 +1155,7 @@ mod tests {
         apu.write_io(0xFF22, 0x00);
         apu.write_io(0xFF23, 0x80);
         for _ in 0..10 {
-            let _ = apu.step(FRAME_CYCLES as u32);
+            let _ = apu.step(FRAME_CYCLES);
             while apu.has_sample() {
                 let _ = apu.take_sample();
             }
@@ -1152,7 +1172,7 @@ mod tests {
             channel.write_io(0xFF14, 0x80);
             let output = channel.output();
             assert!(
-                output >= 0 && output <= 15,
+                (0..=15).contains(&output),
                 "Duty {} should produce valid output, got {}",
                 duty,
                 output
@@ -1572,7 +1592,7 @@ mod tests {
         let _ = apu.step(cycles_per_sample);
         assert!(apu.has_sample());
         let sample = apu.take_sample();
-        assert!(sample >= -128 && sample <= 127);
+        assert!((-128..=127).contains(&sample));
         assert!(!apu.has_sample());
     }
 
@@ -1585,7 +1605,7 @@ mod tests {
             if apu.has_sample() {
                 let sample = apu.sample();
                 assert!(
-                    sample >= -128 && sample <= 127,
+                    (-128..=127).contains(&sample),
                     "Sample {} out of range",
                     sample
                 );

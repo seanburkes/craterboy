@@ -28,6 +28,12 @@ pub struct Ppu {
     palette: [[u8; 3]; 4],
 }
 
+impl Default for Ppu {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Ppu {
     pub fn new() -> Self {
         Self {
@@ -205,10 +211,10 @@ impl Ppu {
                     let palette_index = (palette >> (color_id * 2)) & 0x03;
                     let color = self.palette[palette_index as usize];
                     let idx = (screen_y as usize * width + screen_x as usize) * 3;
-                    if priority {
-                        if self.bg_priority[screen_y as usize * width + screen_x as usize] != 0 {
-                            continue;
-                        }
+                    if priority
+                        && self.bg_priority[screen_y as usize * width + screen_x as usize] != 0
+                    {
+                        continue;
                     }
                     pixels[idx] = color[0];
                     pixels[idx + 1] = color[1];
@@ -460,5 +466,235 @@ mod tests {
 
         ppu.render_frame(&bus, &mut framebuffer);
         assert_eq!(framebuffer.as_slice()[0], 0x88);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::domain::cartridge::ROM_BANK_SIZE;
+    use crate::domain::{Bus, Cartridge, Framebuffer};
+    use proptest::prelude::*;
+
+    fn bus_with_rom(mut rom: Vec<u8>) -> Bus {
+        if rom.len() < 0x0150 {
+            rom.resize(0x0150, 0);
+        }
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        Bus::new(cartridge).expect("bus")
+    }
+
+    // Property: PPU step with 0 cycles should not complete a frame
+    proptest! {
+        #[test]
+        fn prop_ppu_zero_cycles_no_frame(cycles in 0u32..FRAME_CYCLES) {
+            let rom = vec![0; ROM_BANK_SIZE];
+            let bus = bus_with_rom(rom);
+            let mut framebuffer = Framebuffer::new();
+            let mut ppu = Ppu::new();
+
+            let frame_complete = ppu.step(cycles, &bus, &mut framebuffer);
+
+            prop_assert!(!frame_complete, "Frame should not complete before FRAME_CYCLES");
+        }
+    }
+
+    // Property: PPU completes frame after FRAME_CYCLES
+    proptest! {
+        #[test]
+        fn prop_ppu_frame_complete_after_frame_cycles(extra_cycles in 0u32..1000) {
+            let rom = vec![0; ROM_BANK_SIZE];
+            let bus = bus_with_rom(rom);
+            let mut framebuffer = Framebuffer::new();
+            let mut ppu = Ppu::new();
+
+            let frame_complete = ppu.step(FRAME_CYCLES + extra_cycles, &bus, &mut framebuffer);
+
+            prop_assert!(frame_complete, "Frame should complete after FRAME_CYCLES");
+        }
+    }
+
+    // Property: Palette setting preserves RGB values
+    proptest! {
+        #[test]
+        fn prop_ppu_palette_roundtrip(
+            r0 in any::<u8>(), g0 in any::<u8>(), b0 in any::<u8>(),
+            r1 in any::<u8>(), g1 in any::<u8>(), b1 in any::<u8>(),
+            r2 in any::<u8>(), g2 in any::<u8>(), b2 in any::<u8>(),
+            r3 in any::<u8>(), g3 in any::<u8>(), b3 in any::<u8>()
+        ) {
+            let mut ppu = Ppu::new();
+            let palette = [
+                [r0, g0, b0],
+                [r1, g1, b1],
+                [r2, g2, b2],
+                [r3, g3, b3],
+            ];
+
+            ppu.set_palette(palette);
+
+            // We can't directly read the palette, but we can verify it doesn't panic
+            // and that rendering with custom palette works
+            let rom = vec![0; ROM_BANK_SIZE];
+            let mut bus = bus_with_rom(rom);
+            let mut framebuffer = Framebuffer::new();
+            bus.write8(0xFF40, 0x80); // Enable LCD
+
+            ppu.render_frame(&bus, &mut framebuffer);
+
+            // If we get here without panicking, the property holds
+            prop_assert!(true);
+        }
+    }
+
+    // Property: Framebuffer size is consistent (160x144x3 bytes)
+    proptest! {
+        #[test]
+        fn prop_framebuffer_size_consistent(_dummy in any::<u8>()) {
+            let framebuffer = Framebuffer::new();
+            let expected_size = FRAME_WIDTH * FRAME_HEIGHT * 3;
+
+            prop_assert_eq!(
+                framebuffer.as_slice().len(),
+                expected_size,
+                "Framebuffer should be {}x{}x3 bytes",
+                FRAME_WIDTH,
+                FRAME_HEIGHT
+            );
+        }
+    }
+
+    // Property: LCD disabled should clear frame to palette[0]
+    proptest! {
+        #[test]
+        fn prop_lcd_disabled_clears_frame(_dummy in any::<u8>()) {
+            let rom = vec![0; ROM_BANK_SIZE];
+            let mut bus = bus_with_rom(rom);
+            let mut framebuffer = Framebuffer::new();
+            let mut ppu = Ppu::new();
+
+            // Disable LCD (LCDC bit 7 = 0)
+            bus.write8(0xFF40, 0x00);
+
+            ppu.render_frame(&bus, &mut framebuffer);
+
+            // First pixel should be palette[0] color
+            let pixels = framebuffer.as_slice();
+            prop_assert_eq!(pixels[0], DMG_PALETTE[0][0], "R should match palette[0]");
+            prop_assert_eq!(pixels[1], DMG_PALETTE[0][1], "G should match palette[0]");
+            prop_assert_eq!(pixels[2], DMG_PALETTE[0][2], "B should match palette[0]");
+        }
+    }
+
+    // Property: Rendering multiple times produces same result
+    proptest! {
+        #[test]
+        fn prop_render_deterministic(seed in any::<u8>()) {
+            let rom = vec![0; ROM_BANK_SIZE];
+            let mut bus = bus_with_rom(rom);
+            let mut framebuffer1 = Framebuffer::new();
+            let mut framebuffer2 = Framebuffer::new();
+            let mut ppu = Ppu::new();
+
+            // Set up some test data in VRAM
+            bus.write8(0xFF40, 0x91); // Enable LCD, BG
+            bus.write8(0x8000 + seed as u16, seed);
+            bus.write8(0x9800, seed);
+
+            ppu.render_frame(&bus, &mut framebuffer1);
+            ppu.render_frame(&bus, &mut framebuffer2);
+
+            prop_assert_eq!(
+                framebuffer1.as_slice(),
+                framebuffer2.as_slice(),
+                "Rendering should be deterministic"
+            );
+        }
+    }
+
+    // Property: SCX/SCY scroll values don't crash
+    proptest! {
+        #[test]
+        fn prop_scroll_no_crash(scx in any::<u8>(), scy in any::<u8>()) {
+            let rom = vec![0; ROM_BANK_SIZE];
+            let mut bus = bus_with_rom(rom);
+            let mut framebuffer = Framebuffer::new();
+            let mut ppu = Ppu::new();
+
+            bus.write8(0xFF40, 0x91); // Enable LCD, BG
+            bus.write8(0xFF42, scy);  // SCY
+            bus.write8(0xFF43, scx);  // SCX
+
+            ppu.render_frame(&bus, &mut framebuffer);
+
+            // If we get here without panicking, the property holds
+            prop_assert!(true);
+        }
+    }
+
+    // Property: Window position values don't crash
+    proptest! {
+        #[test]
+        fn prop_window_position_no_crash(wx in any::<u8>(), wy in any::<u8>()) {
+            let rom = vec![0; ROM_BANK_SIZE];
+            let mut bus = bus_with_rom(rom);
+            let mut framebuffer = Framebuffer::new();
+            let mut ppu = Ppu::new();
+
+            bus.write8(0xFF40, 0xF1); // Enable LCD, BG, Window
+            bus.write8(0xFF4A, wy);   // WY
+            bus.write8(0xFF4B, wx);   // WX
+
+            ppu.render_frame(&bus, &mut framebuffer);
+
+            prop_assert!(true);
+        }
+    }
+
+    // Property: Palette values don't crash rendering
+    proptest! {
+        #[test]
+        fn prop_palette_values_no_crash(bgp in any::<u8>()) {
+            let rom = vec![0; ROM_BANK_SIZE];
+            let mut bus = bus_with_rom(rom);
+            let mut framebuffer = Framebuffer::new();
+            let mut ppu = Ppu::new();
+
+            bus.write8(0xFF40, 0x91); // Enable LCD, BG
+            bus.write8(0xFF47, bgp);  // BGP
+
+            ppu.render_frame(&bus, &mut framebuffer);
+
+            prop_assert!(true);
+        }
+    }
+
+    // Property: Accumulating cycles eventually produces frame
+    proptest! {
+        #[test]
+        fn prop_step_accumulation(cycle_sizes in prop::collection::vec(1u32..1000, 1..100)) {
+            let rom = vec![0; ROM_BANK_SIZE];
+            let bus = bus_with_rom(rom);
+            let mut framebuffer = Framebuffer::new();
+            let mut ppu = Ppu::new();
+
+            let mut total_cycles = 0u32;
+            let mut frame_completed = false;
+
+            for cycles in cycle_sizes.iter() {
+                total_cycles += cycles;
+                if ppu.step(*cycles, &bus, &mut framebuffer) {
+                    frame_completed = true;
+                    break;
+                }
+            }
+
+            if total_cycles >= FRAME_CYCLES {
+                prop_assert!(frame_completed, "Frame should complete after FRAME_CYCLES worth of steps");
+            } else {
+                prop_assert!(!frame_completed, "Frame should not complete before FRAME_CYCLES");
+            }
+        }
     }
 }

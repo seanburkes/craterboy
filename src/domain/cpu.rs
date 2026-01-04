@@ -20,6 +20,12 @@ pub struct Registers {
     l: u8,
 }
 
+impl Default for Registers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Registers {
     pub fn new() -> Self {
         Self {
@@ -280,6 +286,12 @@ pub struct Cpu {
     halt_bug: bool,
     halted: bool,
     stopped: bool,
+}
+
+impl Default for Cpu {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Cpu {
@@ -991,7 +1003,7 @@ impl Cpu {
         self.regs.set_flag_z(next == 0);
         self.regs.set_flag_n(false);
         self.regs
-            .set_flag_h(((a & 0x0F) + (value & 0x0F) + (carry_in as u8)) > 0x0F);
+            .set_flag_h(((a & 0x0F) + (value & 0x0F) + carry_in) > 0x0F);
         self.regs.set_flag_c(carry1 || carry2);
     }
 
@@ -1214,7 +1226,7 @@ impl Cpu {
     }
 
     fn swap(&mut self, value: u8) -> u8 {
-        let next = (value >> 4) | (value << 4);
+        let next = value.rotate_left(4);
         self.regs.set_flag_z(next == 0);
         self.regs.set_flag_n(false);
         self.regs.set_flag_h(false);
@@ -2490,5 +2502,337 @@ mod tests {
         assert_eq!(cycles, 8);
         assert_eq!(cpu.pc(), 0x0001);
         assert_eq!(cpu.sp(), sp_start);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::domain::cartridge::ROM_BANK_SIZE;
+    use crate::domain::{Bus, Cartridge};
+    use proptest::prelude::*;
+
+    fn bus_with_rom(mut rom: Vec<u8>) -> Bus {
+        if rom.len() < 0x0150 {
+            rom.resize(0x0150, 0);
+        }
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        Bus::new(cartridge).expect("bus")
+    }
+
+    // Property: INC followed by DEC should restore original value (except flags)
+    proptest! {
+        #[test]
+        fn prop_inc_dec_roundtrip(value in any::<u8>()) {
+            let mut cpu = Cpu::new();
+            cpu.regs_mut().set_b(value);
+
+            let result_inc = cpu.inc8(value);
+            let result_dec = cpu.dec8(result_inc);
+
+            prop_assert_eq!(result_dec, value, "INC then DEC should restore value");
+        }
+    }
+
+    // Property: ADD without carry is commutative for non-flag-affecting operations
+    proptest! {
+        #[test]
+        fn prop_add_commutative_result(a in any::<u8>(), b in any::<u8>()) {
+            let mut cpu1 = Cpu::new();
+            let mut cpu2 = Cpu::new();
+
+            cpu1.regs_mut().set_a(a);
+            cpu1.alu_add(b);
+            let result1 = cpu1.regs().a();
+
+            cpu2.regs_mut().set_a(b);
+            cpu2.alu_add(a);
+            let result2 = cpu2.regs().a();
+
+            prop_assert_eq!(result1, result2, "ADD should be commutative");
+        }
+    }
+
+    // Property: XOR with self always produces zero
+    proptest! {
+        #[test]
+        fn prop_xor_self_zero(value in any::<u8>()) {
+            let mut cpu = Cpu::new();
+            cpu.regs_mut().set_a(value);
+            cpu.alu_xor(value);
+
+            prop_assert_eq!(cpu.regs().a(), 0, "XOR with self should be zero");
+            prop_assert!(cpu.regs().flag_z(), "Zero flag should be set");
+            prop_assert!(!cpu.regs().flag_n(), "N flag should be clear");
+            prop_assert!(!cpu.regs().flag_h(), "H flag should be clear");
+            prop_assert!(!cpu.regs().flag_c(), "C flag should be clear");
+        }
+    }
+
+    // Property: OR with 0xFF always produces 0xFF
+    proptest! {
+        #[test]
+        fn prop_or_ff_identity(value in any::<u8>()) {
+            let mut cpu = Cpu::new();
+            cpu.regs_mut().set_a(value);
+            cpu.alu_or(0xFF);
+
+            prop_assert_eq!(cpu.regs().a(), 0xFF, "OR with 0xFF should be 0xFF");
+            prop_assert!(!cpu.regs().flag_z(), "Zero flag should be clear");
+        }
+    }
+
+    // Property: AND with 0x00 always produces 0x00
+    proptest! {
+        #[test]
+        fn prop_and_zero_identity(value in any::<u8>()) {
+            let mut cpu = Cpu::new();
+            cpu.regs_mut().set_a(value);
+            cpu.alu_and(0x00);
+
+            prop_assert_eq!(cpu.regs().a(), 0x00, "AND with 0x00 should be 0x00");
+            prop_assert!(cpu.regs().flag_z(), "Zero flag should be set");
+            prop_assert!(cpu.regs().flag_h(), "H flag should be set for AND");
+        }
+    }
+
+    // Property: ADD 0 is identity
+    proptest! {
+        #[test]
+        fn prop_add_zero_identity(value in any::<u8>()) {
+            let mut cpu = Cpu::new();
+            cpu.regs_mut().set_a(value);
+            cpu.alu_add(0);
+
+            prop_assert_eq!(cpu.regs().a(), value, "ADD 0 should be identity");
+            prop_assert!(!cpu.regs().flag_n(), "N flag should be clear");
+            prop_assert!(!cpu.regs().flag_h(), "H flag should be clear");
+            prop_assert!(!cpu.regs().flag_c(), "C flag should be clear");
+        }
+    }
+
+    // Property: SUB from self is always zero
+    proptest! {
+        #[test]
+        fn prop_sub_self_zero(value in any::<u8>()) {
+            let mut cpu = Cpu::new();
+            cpu.regs_mut().set_a(value);
+            cpu.alu_sub(value);
+
+            prop_assert_eq!(cpu.regs().a(), 0, "SUB self should be zero");
+            prop_assert!(cpu.regs().flag_z(), "Zero flag should be set");
+            prop_assert!(cpu.regs().flag_n(), "N flag should be set for SUB");
+            prop_assert!(!cpu.regs().flag_h(), "H flag should be clear");
+            prop_assert!(!cpu.regs().flag_c(), "C flag should be clear");
+        }
+    }
+
+    // Property: CP doesn't modify A register
+    proptest! {
+        #[test]
+        fn prop_cp_no_modify(a in any::<u8>(), b in any::<u8>()) {
+            let mut cpu = Cpu::new();
+            cpu.regs_mut().set_a(a);
+            cpu.alu_cp(b);
+
+            prop_assert_eq!(cpu.regs().a(), a, "CP should not modify A register");
+        }
+    }
+
+    // Property: 16-bit register set/get roundtrip
+    proptest! {
+        #[test]
+        fn prop_register_16bit_roundtrip(value in any::<u16>()) {
+            let mut regs = Registers::new();
+
+            regs.set_bc(value);
+            prop_assert_eq!(regs.bc(), value, "BC roundtrip");
+
+            regs.set_de(value);
+            prop_assert_eq!(regs.de(), value, "DE roundtrip");
+
+            regs.set_hl(value);
+            prop_assert_eq!(regs.hl(), value, "HL roundtrip");
+
+            // AF has special handling (lower 4 bits of F are always 0)
+            regs.set_af(value);
+            prop_assert_eq!(regs.af(), value & 0xFFF0, "AF roundtrip with F mask");
+        }
+    }
+
+    // Property: Rotate left 8 times restores original value
+    proptest! {
+        #[test]
+        fn prop_rotate_left_identity(value in any::<u8>()) {
+            let mut cpu = Cpu::new();
+            cpu.regs_mut().set_flag_c(false);
+
+            let mut result = value;
+            for _ in 0..8 {
+                result = cpu.rlc(result);
+            }
+
+            prop_assert_eq!(result, value, "RLC 8 times should restore value");
+        }
+    }
+
+    // Property: Rotate right 8 times restores original value
+    proptest! {
+        #[test]
+        fn prop_rotate_right_identity(value in any::<u8>()) {
+            let mut cpu = Cpu::new();
+            cpu.regs_mut().set_flag_c(false);
+
+            let mut result = value;
+            for _ in 0..8 {
+                result = cpu.rrc(result);
+            }
+
+            prop_assert_eq!(result, value, "RRC 8 times should restore value");
+        }
+    }
+
+    // Property: SWAP twice restores original value
+    proptest! {
+        #[test]
+        fn prop_swap_involution(value in any::<u8>()) {
+            let mut cpu = Cpu::new();
+
+            let swapped = cpu.swap(value);
+            let restored = cpu.swap(swapped);
+
+            prop_assert_eq!(restored, value, "SWAP twice should restore value");
+        }
+    }
+
+    // Property: NOP instruction advances PC by 1
+    proptest! {
+        #[test]
+        fn prop_nop_advances_pc(initial_pc in 0u16..0x7F00) {
+            let rom = vec![0x00; ROM_BANK_SIZE]; // All NOPs
+            let mut bus = bus_with_rom(rom);
+            let mut cpu = Cpu::new();
+            cpu.set_pc(initial_pc);
+
+            let cycles = cpu.step(&mut bus).expect("NOP");
+
+            prop_assert_eq!(cycles, 4, "NOP should take 4 cycles");
+            prop_assert_eq!(cpu.pc(), initial_pc.wrapping_add(1), "PC should advance by 1");
+        }
+    }
+
+    // Property: Stack push/pop roundtrip
+    proptest! {
+        #[test]
+        fn prop_stack_push_pop_roundtrip(value in any::<u16>()) {
+            let rom = vec![0x00; ROM_BANK_SIZE];
+            let mut bus = bus_with_rom(rom);
+            let mut cpu = Cpu::new();
+            let sp_initial = cpu.sp();
+
+            cpu.push16(&mut bus, value);
+            let sp_after_push = cpu.sp();
+            let popped = cpu.pop16(&bus);
+            let sp_after_pop = cpu.sp();
+
+            prop_assert_eq!(popped, value, "Popped value should match pushed");
+            prop_assert_eq!(sp_after_push, sp_initial.wrapping_sub(2), "SP should decrease by 2 after push");
+            prop_assert_eq!(sp_after_pop, sp_initial, "SP should be restored after pop");
+        }
+    }
+
+    // Property: SLA shifts left by 1 (multiply by 2 for values < 128)
+    proptest! {
+        #[test]
+        fn prop_sla_multiply_by_two(value in 0u8..128) {
+            let mut cpu = Cpu::new();
+            let result = cpu.sla(value);
+
+            prop_assert_eq!(result, value.wrapping_mul(2), "SLA should multiply by 2 for values < 128");
+            prop_assert!(!cpu.regs().flag_c(), "Carry should be clear for values < 128");
+        }
+    }
+
+    // Property: SRL shifts right by 1 (divide by 2)
+    proptest! {
+        #[test]
+        fn prop_srl_divide_by_two(value in any::<u8>()) {
+            let mut cpu = Cpu::new();
+            let result = cpu.srl(value);
+
+            prop_assert_eq!(result, value / 2, "SRL should divide by 2");
+            prop_assert_eq!(cpu.regs().flag_c(), value & 1 != 0, "Carry should be LSB");
+        }
+    }
+
+    // Property: Flags register lower 4 bits always zero
+    proptest! {
+        #[test]
+        fn prop_flags_lower_4bits_zero(f_value in any::<u8>()) {
+            let mut regs = Registers::new();
+            regs.set_af((0x12 << 8) | f_value as u16);
+
+            prop_assert_eq!(regs.f() & 0x0F, 0, "Lower 4 bits of F should always be 0");
+        }
+    }
+
+    // Property: Zero flag consistency with result
+    proptest! {
+        #[test]
+        fn prop_add_zero_flag_consistency(a in any::<u8>(), b in any::<u8>()) {
+            let mut cpu = Cpu::new();
+            cpu.regs_mut().set_a(a);
+            cpu.alu_add(b);
+
+            let result = cpu.regs().a();
+            let z_flag = cpu.regs().flag_z();
+
+            prop_assert_eq!(z_flag, result == 0, "Zero flag should match result == 0");
+        }
+    }
+
+    // Property: Carry flag for addition overflow
+    proptest! {
+        #[test]
+        fn prop_add_carry_flag_consistency(a in any::<u8>(), b in any::<u8>()) {
+            let mut cpu = Cpu::new();
+            cpu.regs_mut().set_a(a);
+            cpu.alu_add(b);
+
+            let c_flag = cpu.regs().flag_c();
+            let expected_carry = (a as u16 + b as u16) > 0xFF;
+
+            prop_assert_eq!(c_flag, expected_carry, "Carry flag should match overflow");
+        }
+    }
+
+    // Property: Half-carry flag for addition (bit 3 overflow)
+    proptest! {
+        #[test]
+        fn prop_add_half_carry_flag(a in any::<u8>(), b in any::<u8>()) {
+            let mut cpu = Cpu::new();
+            cpu.regs_mut().set_a(a);
+            cpu.alu_add(b);
+
+            let h_flag = cpu.regs().flag_h();
+            let expected_h = ((a & 0x0F) + (b & 0x0F)) > 0x0F;
+
+            prop_assert_eq!(h_flag, expected_h, "Half-carry flag should match bit 3 overflow");
+        }
+    }
+
+    // Property: Memory write then read roundtrip
+    proptest! {
+        #[test]
+        fn prop_memory_write_read_roundtrip(addr in 0xC000u16..0xE000u16, value in any::<u8>()) {
+            let rom = vec![0x00; ROM_BANK_SIZE];
+            let mut bus = bus_with_rom(rom);
+
+            bus.write8(addr, value);
+            let read_value = bus.read8(addr);
+
+            prop_assert_eq!(read_value, value, "Read should return written value");
+        }
     }
 }

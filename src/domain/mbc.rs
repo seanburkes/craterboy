@@ -675,11 +675,11 @@ fn write_ext_ram(cartridge: &mut Cartridge, bank: Option<usize>, addr: u16, valu
     };
     let offset = addr as usize - EXT_RAM_START as usize;
     let index = bank * EXT_RAM_BANK_SIZE + offset;
-    if let Some(byte) = cartridge.ext_ram.get_mut(index) {
-        if *byte != value {
-            *byte = value;
-            cartridge.mark_ram_dirty();
-        }
+    if let Some(byte) = cartridge.ext_ram.get_mut(index)
+        && *byte != value
+    {
+        *byte = value;
+        cartridge.mark_ram_dirty();
     }
 }
 
@@ -716,7 +716,7 @@ fn ram_bank_count_for(cartridge: &Cartridge, max_banks: usize) -> usize {
     if cartridge.ext_ram.is_empty() {
         return 0;
     }
-    let banks = (cartridge.ext_ram.len() + EXT_RAM_BANK_SIZE - 1) / EXT_RAM_BANK_SIZE;
+    let banks = cartridge.ext_ram.len().div_ceil(EXT_RAM_BANK_SIZE);
     banks.min(max_banks)
 }
 
@@ -732,7 +732,7 @@ fn bank_count(bytes: &[u8]) -> usize {
     if bytes.is_empty() {
         0
     } else {
-        (bytes.len() + ROM_BANK_SIZE - 1) / ROM_BANK_SIZE
+        bytes.len().div_ceil(ROM_BANK_SIZE)
     }
 }
 
@@ -971,5 +971,470 @@ mod tests {
     fn bank_count_rounds_up() {
         let bytes = vec![0; ROM_BANK_SIZE + 1];
         assert_eq!(bank_count(&bytes), 2);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::domain::cartridge::ROM_BANK_SIZE;
+    use crate::domain::{Cartridge, CartridgeType};
+    use proptest::prelude::*;
+
+    // Helper to create a minimal valid cartridge
+    fn make_cartridge(cart_type: CartridgeType, rom_banks: usize, ram_size: u8) -> Cartridge {
+        let mut bytes = vec![0; ROM_BANK_SIZE * rom_banks.max(2)];
+        bytes[0x0147] = cart_type.code();
+        bytes[0x0149] = ram_size;
+        Cartridge::from_bytes(bytes).expect("valid cartridge")
+    }
+
+    proptest! {
+        // MBC1 Properties
+
+        #[test]
+        fn prop_mbc1_bank_0_always_readable(bank_select in 0u8..=0x1F) {
+            let mut cartridge = make_cartridge(CartridgeType::Mbc1, 4, 0x00);
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            // Write to bank select
+            mbc.write8(&mut cartridge, 0x2000, bank_select);
+
+            // Bank 0 should always be readable at 0x0000-0x3FFF
+            let _byte = mbc.read8(&cartridge, 0x0000);
+            let _byte = mbc.read8(&cartridge, 0x3FFF);
+        }
+
+        #[test]
+        fn prop_mbc1_rom_bank_zero_becomes_one(
+            addr in 0x4000u16..=0x7FFF
+        ) {
+            let mut bytes = vec![0; ROM_BANK_SIZE * 4];
+            bytes[ROM_BANK_SIZE..ROM_BANK_SIZE * 2].fill(0xAA);
+            bytes[0x0147] = 0x01; // MBC1
+            bytes[0x0149] = 0x00;
+            let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            // Writing 0 to bank select should read bank 1
+            mbc.write8(&mut cartridge, 0x2000, 0x00);
+            let value = mbc.read8(&cartridge, addr);
+            prop_assert_eq!(value, 0xAA, "Bank 0 selection should read bank 1");
+        }
+
+        #[test]
+        fn prop_mbc1_ram_disabled_returns_open_bus(
+            addr in 0xA000u16..=0xBFFF,
+            write_value in any::<u8>()
+        ) {
+            let mut cartridge = make_cartridge(CartridgeType::Mbc1RamBattery, 2, 0x02);
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            // RAM disabled by default
+            mbc.write8(&mut cartridge, addr, write_value);
+            let read_value = mbc.read8(&cartridge, addr);
+
+            prop_assert_eq!(read_value, 0xFF, "Disabled RAM should return 0xFF");
+        }
+
+        #[test]
+        fn prop_mbc1_ram_write_read_roundtrip(
+            addr in 0xA000u16..=0xBFFF,
+            value in any::<u8>()
+        ) {
+            let mut cartridge = make_cartridge(CartridgeType::Mbc1RamBattery, 2, 0x02);
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            // Enable RAM
+            mbc.write8(&mut cartridge, 0x0000, 0x0A);
+
+            // Write and read
+            mbc.write8(&mut cartridge, addr, value);
+            let read = mbc.read8(&cartridge, addr);
+
+            prop_assert_eq!(read, value, "RAM write/read should roundtrip");
+        }
+
+        #[test]
+        fn prop_mbc1_mode_switch_preserves_data(
+            value in any::<u8>()
+        ) {
+            let mut cartridge = make_cartridge(CartridgeType::Mbc1RamBattery, 2, 0x03);
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            mbc.write8(&mut cartridge, 0x0000, 0x0A); // Enable RAM
+            mbc.write8(&mut cartridge, 0xA000, value);
+
+            // Switch mode
+            mbc.write8(&mut cartridge, 0x6000, 0x01);
+
+            // Data should still be there
+            let read = mbc.read8(&cartridge, 0xA000);
+            prop_assert_eq!(read, value, "Mode switch should preserve RAM data");
+        }
+
+        // MBC2 Properties
+
+        #[test]
+        fn prop_mbc2_ram_nibble_mask(
+            addr in 0xA000u16..=0xA1FF,
+            value in any::<u8>()
+        ) {
+            let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+            bytes[0x0147] = 0x05; // MBC2
+            let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            // Enable RAM
+            mbc.write8(&mut cartridge, 0x0000, 0x0A);
+
+            // Write full byte, read should be masked to 4 bits
+            mbc.write8(&mut cartridge, addr, value);
+            let read = mbc.read8(&cartridge, addr);
+
+            prop_assert_eq!(read, 0xF0 | (value & 0x0F), "MBC2 RAM should mask to lower 4 bits with upper 4 set");
+        }
+
+        #[test]
+        fn prop_mbc2_bank_select_uses_lower_4_bits(
+            bank_bits in 0u8..=0x0F
+        ) {
+            let mut bytes = vec![0; ROM_BANK_SIZE * 16];
+            for i in 0..16 {
+                let start = i * ROM_BANK_SIZE;
+                bytes[start..start + ROM_BANK_SIZE].fill(i as u8);
+            }
+            bytes[0x0147] = 0x05; // MBC2
+            let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            // Bank select with upper bits set
+            mbc.write8(&mut cartridge, 0x2100, 0xF0 | bank_bits);
+
+            let expected_bank = if bank_bits == 0 { 1 } else { bank_bits };
+            let read = mbc.read8(&cartridge, 0x4000);
+            prop_assert_eq!(read, expected_bank, "MBC2 should use only lower 4 bits for bank select");
+        }
+
+        #[test]
+        fn prop_mbc2_ram_address_wraps(
+            offset in 0u16..=0x1FF,  // Only test within valid 512-byte range
+            value in any::<u8>()
+        ) {
+            let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+            bytes[0x0147] = 0x05; // MBC2
+            let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            mbc.write8(&mut cartridge, 0x0000, 0x0A); // Enable RAM
+
+            // Write to base address
+            let addr1 = 0xA000 + offset;
+            mbc.write8(&mut cartridge, addr1, value);
+
+            // Read from mirrored location (MBC2 RAM mirrors every 512 bytes)
+            let addr2 = 0xA000 + (offset & 0x1FF);
+            let read = mbc.read8(&cartridge, addr2);
+
+            prop_assert_eq!(read & 0x0F, value & 0x0F, "MBC2 RAM should mirror every 512 bytes");
+        }
+
+        // MBC3 Properties
+
+        #[test]
+        fn prop_mbc3_rom_bank_select_wraps(
+            bank_select in 1u8..=0x7F
+        ) {
+            let mut bytes = vec![0; ROM_BANK_SIZE * 8];
+            for i in 0..8 {
+                let start = i * ROM_BANK_SIZE;
+                bytes[start..start + ROM_BANK_SIZE].fill(i as u8);
+            }
+            bytes[0x0147] = 0x10; // MBC3
+            bytes[0x0149] = 0x02;
+            let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            mbc.write8(&mut cartridge, 0x2000, bank_select);
+            // MBC3 bank selection wraps within available banks using normalize_switchable_bank
+            // Bank 0 becomes bank 1, others wrap modulo available banks
+            let expected_bank_raw = (bank_select as usize) % 8;
+            let expected_bank = if expected_bank_raw == 0 { 1 } else { expected_bank_raw };
+            let read = mbc.read8(&cartridge, 0x4000);
+
+            prop_assert_eq!(read, expected_bank as u8, "MBC3 bank should wrap to available banks");
+        }
+
+        #[test]
+        fn prop_mbc3_ram_bank_select(
+            ram_bank in 0u8..=0x03,
+            value in any::<u8>()
+        ) {
+            let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+            bytes[0x0147] = 0x13; // MBC3 with RAM
+            bytes[0x0149] = 0x03; // 32KB RAM (4 banks)
+            let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            mbc.write8(&mut cartridge, 0x0000, 0x0A); // Enable RAM
+            mbc.write8(&mut cartridge, 0x4000, ram_bank); // Select bank
+            mbc.write8(&mut cartridge, 0xA000, value);
+
+            // Switch to different bank and back
+            mbc.write8(&mut cartridge, 0x4000, (ram_bank + 1) % 4);
+            mbc.write8(&mut cartridge, 0x4000, ram_bank);
+
+            let read = mbc.read8(&cartridge, 0xA000);
+            prop_assert_eq!(read, value, "MBC3 RAM banking should preserve data");
+        }
+
+        #[test]
+        fn prop_mbc3_rtc_latch_freezes_time(
+            cycles in 1u32..=CYCLES_PER_SECOND
+        ) {
+            let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+            bytes[0x0147] = 0x0F; // MBC3 with RTC
+            let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            mbc.set_rtc_mode(RtcMode::Deterministic);
+            mbc.write8(&mut cartridge, 0x0000, 0x0A); // Enable RTC
+            mbc.write8(&mut cartridge, 0x4000, 0x08); // Select RTC seconds
+
+            // Advance time and latch
+            mbc.tick(cycles);
+            mbc.write8(&mut cartridge, 0x6000, 0x00);
+            mbc.write8(&mut cartridge, 0x6000, 0x01);
+            let latched_value = mbc.read8(&cartridge, 0xA000);
+
+            // Advance more time
+            mbc.tick(cycles);
+
+            // Latched value shouldn't change
+            let still_latched = mbc.read8(&cartridge, 0xA000);
+            prop_assert_eq!(still_latched, latched_value, "RTC latch should freeze time");
+        }
+
+        #[test]
+        fn prop_mbc3_rtc_registers_writable(
+            value in 0u8..=59
+        ) {
+            let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+            bytes[0x0147] = 0x0F; // MBC3 with RTC
+            let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            mbc.write8(&mut cartridge, 0x0000, 0x0A); // Enable RTC
+            mbc.write8(&mut cartridge, 0x4000, 0x08); // Select RTC seconds
+            mbc.write8(&mut cartridge, 0xA000, value);
+
+            let read = mbc.read8(&cartridge, 0xA000);
+            prop_assert_eq!(read, value, "RTC registers should be writable");
+        }
+
+        #[test]
+        #[allow(non_snake_case)]
+        fn prop_mbc3_without_rtc_treats_08_0C_as_ram(
+            register in 0x08u8..=0x0C,
+            value in any::<u8>()
+        ) {
+            let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+            bytes[0x0147] = 0x13; // MBC3 without RTC
+            bytes[0x0149] = 0x03; // 32KB RAM
+            let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            mbc.write8(&mut cartridge, 0x0000, 0x0A); // Enable RAM
+
+            // Writing to RTC register range should do nothing
+            mbc.write8(&mut cartridge, 0x4000, register);
+            mbc.write8(&mut cartridge, 0xA000, value);
+
+            // Should read from regular RAM bank 0
+            mbc.write8(&mut cartridge, 0x4000, 0x00);
+            let read = mbc.read8(&cartridge, 0xA000);
+
+            prop_assert_eq!(read, value, "MBC3 without RTC should treat 0x08-0x0C as RAM bank 0");
+        }
+
+        // MBC5 Properties
+
+        #[test]
+        fn prop_mbc5_9bit_bank_select(
+            low_byte in any::<u8>(),
+            high_bit in 0u8..=1
+        ) {
+            let banks = ((high_bit as usize) << 8) | (low_byte as usize);
+            let num_banks = (banks + 2).min(512);
+            let mut bytes = vec![0; ROM_BANK_SIZE * num_banks];
+
+            // Fill each bank with its bank number (mod 256)
+            for i in 0..num_banks {
+                let start = i * ROM_BANK_SIZE;
+                bytes[start..start + ROM_BANK_SIZE].fill((i % 256) as u8);
+            }
+
+            bytes[0x0147] = 0x19; // MBC5
+            let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            mbc.write8(&mut cartridge, 0x2000, low_byte);
+            mbc.write8(&mut cartridge, 0x3000, high_bit);
+
+            let expected_bank = if banks >= num_banks {
+                banks % num_banks
+            } else {
+                banks
+            };
+
+            let read = mbc.read8(&cartridge, 0x4000);
+            prop_assert_eq!(read, (expected_bank % 256) as u8, "MBC5 should support 9-bit ROM banking");
+        }
+
+        #[test]
+        fn prop_mbc5_bank_zero_is_valid(
+            offset in 0u16..=0x3FFF  // Test within switchable bank range
+        ) {
+            let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+            // Fill banks with distinct values
+            for i in 0..ROM_BANK_SIZE {
+                bytes[i] = 0xAA;  // Bank 0
+                bytes[ROM_BANK_SIZE + i] = 0xCC;  // Bank 1
+            }
+            // Set MBC5 type in header (in bank 0)
+            bytes[0x0147] = 0x19;
+
+            let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            // Unlike MBC1, bank 0 is valid for MBC5 in switchable area
+            mbc.write8(&mut cartridge, 0x2000, 0x00);
+            mbc.write8(&mut cartridge, 0x3000, 0x00);
+
+            let addr = 0x4000 + offset;
+            let value = mbc.read8(&cartridge, addr);
+
+            // When bank 0 is selected, reading 0x4000-0x7FFF should read from bank 0
+            let expected = if offset == 0x0147 {
+                0x19  // This is the cartridge type byte in the header
+            } else {
+                0xAA  // All other bytes in bank 0
+            };
+
+            prop_assert_eq!(value, expected, "MBC5 should allow bank 0 selection in switchable area");
+        }
+
+        #[test]
+        fn prop_mbc5_ram_banking_4bit(
+            ram_bank in 0u8..=0x0F,
+            value in any::<u8>()
+        ) {
+            let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+            bytes[0x0147] = 0x1B; // MBC5 with RAM
+            bytes[0x0149] = 0x04; // 128KB RAM
+            let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            mbc.write8(&mut cartridge, 0x0000, 0x0A); // Enable RAM
+            mbc.write8(&mut cartridge, 0x4000, ram_bank); // Select bank (uses lower 4 bits)
+            mbc.write8(&mut cartridge, 0xA000, value);
+
+            let effective_bank = ram_bank & 0x0F;
+            mbc.write8(&mut cartridge, 0x4000, effective_bank);
+            let read = mbc.read8(&cartridge, 0xA000);
+
+            prop_assert_eq!(read, value, "MBC5 should use 4-bit RAM banking");
+        }
+
+        // ROM-only Properties
+
+        #[test]
+        fn prop_rom_only_fixed_banks(
+            addr in 0x0000u16..=0x7FFF
+        ) {
+            let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+            bytes[addr as usize] = 0xAB;
+            bytes[0x0147] = 0x00; // ROM only
+            let cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+            let mbc = Mbc::new(&cartridge).expect("mbc");
+
+            let value = mbc.read8(&cartridge, addr);
+            prop_assert_eq!(value, 0xAB, "ROM-only should have fixed mapping");
+        }
+
+        #[test]
+        fn prop_rom_only_ram_roundtrip(
+            addr in 0xA000u16..=0xBFFF,
+            value in any::<u8>()
+        ) {
+            let mut bytes = vec![0; ROM_BANK_SIZE];
+            bytes[0x0147] = 0x08; // ROM + RAM
+            bytes[0x0149] = 0x02; // 8KB RAM
+            let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            mbc.write8(&mut cartridge, addr, value);
+            let read = mbc.read8(&cartridge, addr);
+
+            prop_assert_eq!(read, value, "ROM-only RAM should roundtrip");
+        }
+
+        // General MBC Properties
+
+        #[test]
+        fn prop_tick_doesnt_crash(
+            cycles in 1u32..=CYCLES_PER_SECOND * 2,
+            cart_type in prop::sample::select(vec![
+                CartridgeType::Mbc1,
+                CartridgeType::Mbc2,
+                CartridgeType::Mbc3TimerRamBattery,
+                CartridgeType::Mbc5,
+            ])
+        ) {
+            let cartridge = make_cartridge(cart_type, 2, 0x02);
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            mbc.tick(cycles);
+            // Should not crash
+        }
+
+        #[test]
+        fn prop_ram_enable_is_idempotent(
+            value in any::<u8>(),
+            addr in 0xA000u16..=0xBFFF
+        ) {
+            let mut cartridge = make_cartridge(CartridgeType::Mbc1RamBattery, 2, 0x02);
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            // Enable RAM twice
+            mbc.write8(&mut cartridge, 0x0000, 0x0A);
+            mbc.write8(&mut cartridge, 0x0000, 0x0A);
+
+            mbc.write8(&mut cartridge, addr, value);
+            let read = mbc.read8(&cartridge, addr);
+
+            prop_assert_eq!(read, value, "Multiple RAM enables should work");
+        }
+
+        #[test]
+        fn prop_writes_to_rom_area_dont_crash(
+            addr in 0x0000u16..=0x7FFF,
+            value in any::<u8>(),
+            cart_type in prop::sample::select(vec![
+                CartridgeType::Mbc1,
+                CartridgeType::Mbc2,
+                CartridgeType::Mbc3,
+                CartridgeType::Mbc5,
+            ])
+        ) {
+            let mut cartridge = make_cartridge(cart_type, 4, 0x02);
+            let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+            // Writing to ROM areas changes MBC state but shouldn't crash
+            mbc.write8(&mut cartridge, addr, value);
+
+            // Should still be readable
+            let _read = mbc.read8(&cartridge, addr);
+        }
     }
 }

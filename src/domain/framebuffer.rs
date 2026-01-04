@@ -8,6 +8,12 @@ pub struct Framebuffer {
     pixels: Vec<u8>,
 }
 
+impl Default for Framebuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Framebuffer {
     pub fn new() -> Self {
         Self {
@@ -25,5 +31,9 @@ impl Framebuffer {
 
     pub fn len(&self) -> usize {
         self.pixels.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pixels.is_empty()
     }
 }

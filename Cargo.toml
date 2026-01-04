@@ -15,6 +15,9 @@ rfd = "0.14"
 rodio = { version = "0.18", optional = true }
 gilrs = { version = "0.10", optional = true }
 
+[dev-dependencies]
+proptest = "1.6"
+
 [features]
 default = ["audio", "gamepad"]
 audio = ["rodio"]

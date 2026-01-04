@@ -204,7 +204,7 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
     let mut frame_time_last = Instant::now();
     state.set_overlay_metric("FPS", "0.0");
     state.set_overlay_metric("Frame", "0.0 ms");
-    state.set_overlay_metric("Target", &format!("{:.3} ms", target_ms));
+    state.set_overlay_metric("Target", format!("{:.3} ms", target_ms));
     state.set_overlay_metric("Palette", PALETTES[state.palette_index].name);
     state.set_overlay_metric("Shader", state.effect.name());
 
@@ -318,10 +318,10 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
 
 fn load_rom_cartridge(path: Option<PathBuf>) -> (Option<Cartridge>, Option<PathBuf>) {
     let mut path = path;
-    if path.is_none() {
-        if let Ok(Some((resume_path, _))) = app::load_auto_resume_path() {
-            path = Some(resume_path);
-        }
+    if path.is_none()
+        && let Ok(Some((resume_path, _))) = app::load_auto_resume_path()
+    {
+        path = Some(resume_path);
     }
 
     let Some(path) = path else {
@@ -798,10 +798,10 @@ impl State {
         });
 
         let mut emulator = Emulator::new();
-        if let Some(cartridge) = cartridge {
-            if let Err(err) = emulator.load_cartridge_with_boot_rom(cartridge, boot_rom.clone()) {
-                eprintln!("Failed to initialize cartridge: {:?}", err);
-            }
+        if let Some(cartridge) = cartridge
+            && let Err(err) = emulator.load_cartridge_with_boot_rom(cartridge, boot_rom.clone())
+        {
+            eprintln!("Failed to initialize cartridge: {:?}", err);
         }
         let has_bus = emulator.has_bus();
 
@@ -881,10 +881,10 @@ impl State {
         } else {
             // Poll gamepad input
             #[cfg(feature = "gamepad")]
-            if let Some(ref gilrs) = self.gilrs {
-                if let Some((_id, gamepad)) = gilrs.gamepads().next() {
-                    self.input.handle_gamepad(&gamepad, 0.15);
-                }
+            if let Some(ref gilrs) = self.gilrs
+                && let Some((_id, gamepad)) = gilrs.gamepads().next()
+            {
+                self.input.handle_gamepad(&gamepad, 0.15);
             }
 
             self.input.apply(&mut self.emulator);
@@ -1407,7 +1407,7 @@ fn prepare_framebuffer_upload(frame: &[u8], bars: &[f32]) -> (Vec<u8>, u32) {
     }
     let unpadded = width * 4;
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
-    let padded = ((unpadded + align - 1) / align) * align;
+    let padded = unpadded.div_ceil(align) * align;
     let mut data = vec![0u8; padded * height];
     for y in 0..height {
         let dst = y * padded;
@@ -1493,7 +1493,7 @@ fn prepare_overlay_upload(rgba: &[u8], width: usize, height: usize) -> (Vec<u8>,
     }
     let unpadded = width * 4;
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
-    let padded = ((unpadded + align - 1) / align) * align;
+    let padded = unpadded.div_ceil(align) * align;
     let mut data = vec![0u8; padded * height];
     for y in 0..height {
         let src = y * unpadded;
