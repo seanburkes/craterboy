@@ -98,10 +98,16 @@ impl Ppu {
                         window_active && (y as u8) >= wy && (x as i16 + 7) >= wx as i16;
 
                     let (tile_map_base, tile_x, tile_y, line_x, line_y) = if use_window {
-                        let win_x = (x as i16 + 7 - wx as i16) as usize;
-                        let win_y = (y as i16 - wy as i16) as usize;
-                        let tile_x = win_x / 8;
-                        let tile_y = win_y / 8;
+                        let win_x_i16 = x as i16 + 7 - wx as i16;
+                        let win_y_i16 = y as i16 - wy as i16;
+
+                        // Window coordinates can be negative (off-screen left/top)
+                        // but we still need to calculate which tile to show
+                        let win_x = if win_x_i16 < 0 { 0 } else { win_x_i16 as usize };
+                        let win_y = if win_y_i16 < 0 { 0 } else { win_y_i16 as usize };
+
+                        let tile_x = (win_x / 8) % 32; // Wrap to 32-tile width
+                        let tile_y = (win_y / 8) % 32; // Wrap to 32-tile height
                         let line_x = win_x % 8;
                         let line_y = win_y % 8;
                         (win_tile_map_base, tile_x, tile_y, line_x, line_y)
@@ -116,6 +122,10 @@ impl Ppu {
                     };
 
                     let map_index = tile_y * 32 + tile_x;
+                    if map_index >= 1024 {
+                        // Out of bounds tilemap access, skip this pixel
+                        continue;
+                    }
                     let tile_id = vram[tile_map_base + map_index];
                     let tile_offset = if use_unsigned {
                         (tile_id as usize) * TILE_BYTES
@@ -134,6 +144,7 @@ impl Ppu {
                     pixels[idx] = color[0];
                     pixels[idx + 1] = color[1];
                     pixels[idx + 2] = color[2];
+                    // Window pixels should use their color_id for priority, not BG
                     self.bg_priority[y * width + x] = color_id;
                 }
             }
