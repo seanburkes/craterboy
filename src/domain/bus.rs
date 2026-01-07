@@ -77,6 +77,17 @@ enum HdmaMode {
     General,
 }
 
+/// Timer overflow occurs in 3 stages:
+/// 1. Normal: No overflow
+/// 2. Overflow: TIMA = 0x00, TMA not yet loaded
+/// 3. Interrupt: TMA loaded to TIMA, IF flag set
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimerOverflowState {
+    Normal,
+    Overflow,
+    Interrupt,
+}
+
 #[derive(Debug)]
 pub struct Bus {
     cartridge: Cartridge,
@@ -91,11 +102,15 @@ pub struct Bus {
     io: Vec<u8>,
     hram: Vec<u8>,
     div: u8,
-    div_counter: u16,
+    // System counter (internal 16-bit counter, DIV is upper 8 bits)
+    system_counter: u16,
     tima: u8,
     tma: u8,
     tac: u8,
-    tima_counter: u32,
+    // Previous state of the timer bit (for falling edge detection)
+    timer_bit_prev: bool,
+    // Overflow delay state machine (None, Overflow, Interrupt)
+    timer_overflow_state: TimerOverflowState,
     ly: u8,
     lyc: u8,
     stat: u8,
@@ -205,11 +220,12 @@ impl Bus {
             io,
             hram: vec![0; HRAM_SIZE],
             div: 0,
-            div_counter: 0,
+            system_counter: 0,
             tima: 0,
             tma: 0,
             tac: 0,
-            tima_counter: 0,
+            timer_bit_prev: false,
+            timer_overflow_state: TimerOverflowState::Normal,
             ly: 0,
             lyc: 0,
             stat,
@@ -457,11 +473,12 @@ impl Bus {
     pub fn apply_post_boot_state(&mut self) {
         self.boot_rom_enabled = false;
         self.div = 0xAB;
-        self.div_counter = (self.div as u16) << 8;
+        self.system_counter = (self.div as u16) << 8;
         self.tima = 0x00;
         self.tma = 0x00;
         self.tac = 0x00;
-        self.tima_counter = 0;
+        self.timer_bit_prev = false;
+        self.timer_overflow_state = TimerOverflowState::Normal;
         self.interrupt_flag = 0xE1;
         self.interrupt_enable = 0x00;
         self.ly = 0x00;
@@ -562,12 +579,31 @@ impl Bus {
         match addr {
             REG_JOYP => self.joyp_select = value & 0x30,
             REG_DIV => {
-                self.div = 0;
-                self.div_counter = 0;
+                // Writing to DIV resets the entire system counter
+                // This can trigger a falling edge if the currently selected bit was set
+                self.handle_div_write();
             }
-            REG_TIMA => self.tima = value,
-            REG_TMA => self.tma = value,
-            REG_TAC => self.tac = value,
+            REG_TIMA => {
+                // Writing to TIMA during overflow cycle prevents TMA reload and interrupt
+                if self.timer_overflow_state == TimerOverflowState::Overflow {
+                    self.timer_overflow_state = TimerOverflowState::Normal;
+                }
+                // Writing during interrupt cycle is ignored (TMA will be loaded anyway)
+                if self.timer_overflow_state != TimerOverflowState::Interrupt {
+                    self.tima = value;
+                }
+            }
+            REG_TMA => {
+                self.tma = value;
+                // If written during interrupt cycle, the value is also copied to TIMA
+                if self.timer_overflow_state == TimerOverflowState::Interrupt {
+                    self.tima = value;
+                }
+            }
+            REG_TAC => {
+                // Changing TAC can trigger a falling edge
+                self.handle_tac_write(value);
+            }
             REG_IF => self.interrupt_flag = value,
             REG_STAT => self.stat = (self.stat & 0x07) | (value & 0xF8),
             REG_LY => {
@@ -666,35 +702,138 @@ impl Bus {
     }
 
     fn step_div(&mut self, cycles: u32) {
-        let new = self.div_counter.wrapping_add(cycles as u16);
-        self.div_counter = new;
-        self.div = (new >> 8) as u8;
+        // Step the system counter one M-cycle at a time to properly handle edge detection
+        for _ in 0..cycles {
+            self.step_timer_single_cycle();
+        }
     }
 
-    fn step_timer(&mut self, cycles: u32) {
-        if self.tac & 0x04 == 0 {
+    /// Returns the currently selected bit of the system counter based on TAC
+    fn get_timer_bit(&self) -> bool {
+        let bit_index = match self.tac & 0x03 {
+            0x00 => 9, // Bit 9: increment every 1024 cycles
+            0x01 => 3, // Bit 3: increment every 16 cycles
+            0x02 => 5, // Bit 5: increment every 64 cycles
+            0x03 => 7, // Bit 7: increment every 256 cycles
+            _ => 9,
+        };
+        (self.system_counter & (1 << bit_index)) != 0
+    }
+
+    /// Increment TIMA and handle overflow
+    fn increment_tima(&mut self) {
+        // Only increment if not already in an overflow state
+        if self.timer_overflow_state != TimerOverflowState::Normal {
             return;
         }
 
-        let period = match self.tac & 0x03 {
-            0x00 => 1024,
-            0x01 => 16,
-            0x02 => 64,
-            0x03 => 256,
-            _ => 1024,
-        };
+        let (next, overflow) = self.tima.overflowing_add(1);
+        if overflow {
+            // TIMA overflows to 0x00
+            self.tima = 0x00;
+            // Set overflow state - TMA will be loaded NEXT cycle
+            self.timer_overflow_state = TimerOverflowState::Overflow;
+        } else {
+            self.tima = next;
+        }
+    }
 
-        self.tima_counter += cycles;
-        while self.tima_counter >= period {
-            self.tima_counter -= period;
-            let (next, overflow) = self.tima.overflowing_add(1);
-            if overflow {
+    fn step_timer_single_cycle(&mut self) {
+        // Process overflow state machine BEFORE incrementing
+        // This ensures proper timing: overflow in cycle N, reload in cycle N+1
+        let prev_overflow_state = self.timer_overflow_state;
+
+        match prev_overflow_state {
+            TimerOverflowState::Normal => {
+                // Nothing to do yet
+            }
+            TimerOverflowState::Overflow => {
+                // One M-cycle after overflow: load TMA and request interrupt
+                // This happens at START of next cycle, overwriting any CPU writes from previous cycle
                 self.tima = self.tma;
                 self.interrupt_flag |= IF_TIMER;
-            } else {
-                self.tima = next;
+                self.timer_overflow_state = TimerOverflowState::Interrupt;
+            }
+            TimerOverflowState::Interrupt => {
+                // Overflow handling complete, back to normal
+                self.timer_overflow_state = TimerOverflowState::Normal;
             }
         }
+
+        // Increment system counter (DIV is upper 8 bits)
+        self.system_counter = self.system_counter.wrapping_add(1);
+        self.div = (self.system_counter >> 8) as u8;
+
+        // Get the currently selected timer bit
+        let timer_bit = self.get_timer_bit();
+
+        // Detect falling edge (1 -> 0) when timer is enabled
+        let timer_enabled = (self.tac & 0x04) != 0;
+        if timer_enabled && self.timer_bit_prev && !timer_bit {
+            // Only increment if we haven't just started processing an overflow
+            // (i.e., don't increment on the same cycle we're loading TMA)
+            if prev_overflow_state == TimerOverflowState::Normal {
+                self.increment_tima();
+            }
+        }
+
+        // Save current bit for next cycle
+        self.timer_bit_prev = timer_bit;
+    }
+
+    /// Handle DIV write (resets system counter and can trigger falling edge)
+    fn handle_div_write(&mut self) {
+        // Check if resetting would cause a falling edge
+        let old_bit = self.get_timer_bit();
+
+        // Reset system counter
+        self.system_counter = 0;
+        self.div = 0;
+
+        let new_bit = self.get_timer_bit();
+
+        // If timer is enabled and we had a falling edge, increment TIMA
+        let timer_enabled = (self.tac & 0x04) != 0;
+        if timer_enabled && old_bit && !new_bit {
+            self.increment_tima();
+        }
+
+        self.timer_bit_prev = new_bit;
+    }
+
+    /// Handle TAC write (changing bits can trigger falling edge)
+    fn handle_tac_write(&mut self, value: u8) {
+        let old_enabled = (self.tac & 0x04) != 0;
+        let new_enabled = (value & 0x04) != 0;
+
+        let old_bit = self.get_timer_bit();
+
+        // Update TAC
+        self.tac = value;
+
+        let new_bit = self.get_timer_bit();
+
+        // Falling edge detection on TAC change
+        // On DMG: disabling timer with bit set causes increment
+        // On CGB: behavior varies, we implement conservative DMG behavior
+        let falling_edge = old_bit && !new_bit;
+
+        if falling_edge {
+            if old_enabled && new_enabled {
+                // Both enabled: falling edge from changing clock select
+                self.increment_tima();
+            } else if old_enabled && !new_enabled {
+                // Disabling timer: DMG glitch behavior
+                self.increment_tima();
+            }
+        }
+
+        self.timer_bit_prev = new_bit;
+    }
+
+    fn step_timer(&mut self, _cycles: u32) {
+        // Timer is now handled by step_div (step_timer_single_cycle)
+        // This function is kept for API compatibility but does nothing
     }
 
     fn step_dma(&mut self, cycles: u32) {
@@ -1205,7 +1344,8 @@ mod tests {
 
         bus.write8(REG_TIMA, 0xFF);
         bus.write8(REG_TMA, 0xAA);
-        bus.step(16);
+        // Step 17 cycles: 16 to trigger overflow, +1 for TMA reload
+        bus.step(17);
         assert_eq!(bus.read8(REG_TIMA), 0xAA);
         assert_eq!(bus.read8(REG_IF) & IF_TIMER, IF_TIMER);
     }
@@ -1791,6 +1931,343 @@ mod tests {
         assert_eq!(bus.read8(REG_HDMA3), 0x56);
         assert_eq!(bus.read8(REG_HDMA4), 0x70);
     }
+
+    // ============================================================================
+    // Timer Edge Detection Tests (following Pan Docs Timer Obscure Behaviour)
+    // ============================================================================
+
+    #[test]
+    fn timer_increments_on_falling_edge() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Enable timer with fastest rate (16 cycles per increment)
+        bus.write8(REG_TAC, 0x05); // Enable, clock select 01 (bit 3)
+        bus.write8(REG_TIMA, 0x00);
+
+        // Step 15 cycles: bit 3 goes 0->1 but no increment yet
+        bus.step(15);
+        assert_eq!(bus.read8(REG_TIMA), 0x00, "No increment before 16 cycles");
+
+        // Step 1 more cycle: bit 3 goes 1->0 (falling edge), TIMA increments
+        bus.step(1);
+        assert_eq!(bus.read8(REG_TIMA), 0x01, "Increment on falling edge");
+
+        // Another 16 cycles
+        bus.step(16);
+        assert_eq!(
+            bus.read8(REG_TIMA),
+            0x02,
+            "Second increment after 16 cycles"
+        );
+    }
+
+    #[test]
+    fn timer_overflow_has_one_cycle_delay() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Enable timer with fastest rate (16 cycles per increment)
+        bus.write8(REG_TAC, 0x05);
+        bus.write8(REG_TIMA, 0xFE);
+        bus.write8(REG_TMA, 0x42);
+        bus.write8(REG_IF, 0x00);
+
+        // Step 16 cycles: TIMA goes 0xFE -> 0xFF
+        bus.step(16);
+        assert_eq!(bus.read8(REG_TIMA), 0xFF, "TIMA should be 0xFF");
+        assert_eq!(bus.read8(REG_IF) & IF_TIMER, 0x00, "No interrupt yet");
+
+        // Step 16 cycles: TIMA overflows to 0x00 (overflow cycle)
+        bus.step(16);
+        assert_eq!(
+            bus.read8(REG_TIMA),
+            0x00,
+            "TIMA should be 0x00 during overflow cycle"
+        );
+        assert_eq!(
+            bus.read8(REG_IF) & IF_TIMER,
+            0x00,
+            "Interrupt not set during overflow cycle"
+        );
+
+        // Step 4 more cycles: TMA loaded to TIMA, interrupt requested
+        bus.step(4);
+        assert_eq!(
+            bus.read8(REG_TIMA),
+            0x42,
+            "TIMA should be reloaded from TMA"
+        );
+        assert_eq!(
+            bus.read8(REG_IF) & IF_TIMER,
+            IF_TIMER,
+            "Interrupt should be set"
+        );
+    }
+
+    #[test]
+    fn timer_write_during_overflow_cancels_reload() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Enable timer with fastest rate
+        bus.write8(REG_TAC, 0x05);
+        bus.write8(REG_TIMA, 0xFF);
+        bus.write8(REG_TMA, 0x42);
+        bus.write8(REG_IF, 0x00);
+
+        // Step 16 cycles: TIMA overflows to 0x00
+        bus.step(16);
+        assert_eq!(bus.read8(REG_TIMA), 0x00, "TIMA should overflow to 0x00");
+
+        // Write to TIMA during overflow cycle (before TMA reload)
+        bus.write8(REG_TIMA, 0x99);
+
+        // Step a few more cycles (less than a full period) - written value should stay
+        bus.step(8);
+        assert_eq!(
+            bus.read8(REG_TIMA),
+            0x99,
+            "Written value should be preserved"
+        );
+        assert_eq!(
+            bus.read8(REG_IF) & IF_TIMER,
+            0x00,
+            "Interrupt should be cancelled"
+        );
+    }
+
+    #[test]
+    fn timer_write_during_interrupt_cycle_ignored() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Enable timer with fastest rate
+        bus.write8(REG_TAC, 0x05);
+        bus.write8(REG_TIMA, 0xFF);
+        bus.write8(REG_TMA, 0x42);
+        bus.write8(REG_IF, 0x00);
+
+        // Step to overflow and past it (to interrupt cycle)
+        bus.step(16); // Overflow to 0x00
+        bus.step(1); // Now in interrupt cycle (at beginning), TIMA will be loaded from TMA this cycle
+
+        // Write to TIMA during interrupt cycle - should be ignored
+        // (The TMA value should overwrite any write)
+        bus.write8(REG_TIMA, 0x99);
+
+        // Step to complete the interrupt cycle
+        bus.step(1);
+
+        // Verify TIMA has TMA value (write was overridden)
+        assert_eq!(
+            bus.read8(REG_TIMA),
+            0x42,
+            "Write during interrupt cycle should be overwritten by TMA"
+        );
+    }
+
+    #[test]
+    fn tma_write_during_interrupt_cycle_updates_tima() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Enable timer with fastest rate
+        bus.write8(REG_TAC, 0x05);
+        bus.write8(REG_TIMA, 0xFF);
+        bus.write8(REG_TMA, 0x42);
+
+        // Step to overflow (TIMA becomes 0x00, state = Overflow)
+        bus.step(16);
+        assert_eq!(bus.read8(REG_TIMA), 0x00, "TIMA should overflow to 0x00");
+
+        // Step 1 more cycle to enter interrupt cycle (TMA loaded, state = Interrupt)
+        bus.step(1);
+        assert_eq!(bus.read8(REG_TIMA), 0x42, "TIMA should be loaded from TMA");
+
+        // Write to TMA during interrupt cycle (state is still Interrupt)
+        bus.write8(REG_TMA, 0x77);
+
+        // TIMA should also update to new TMA value immediately
+        assert_eq!(
+            bus.read8(REG_TIMA),
+            0x77,
+            "TIMA should update when TMA written during interrupt cycle"
+        );
+    }
+
+    #[test]
+    fn div_write_resets_system_counter() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Step to increment DIV
+        bus.step(256);
+        assert_eq!(bus.read8(REG_DIV), 0x01, "DIV should increment");
+
+        // Write to DIV resets to 0
+        bus.write8(REG_DIV, 0xFF);
+        assert_eq!(bus.read8(REG_DIV), 0x00, "DIV should reset to 0");
+
+        // Step and verify counting restarts from 0
+        bus.step(256);
+        assert_eq!(bus.read8(REG_DIV), 0x01, "DIV should count from 0");
+    }
+
+    #[test]
+    fn div_write_can_trigger_falling_edge() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Enable timer with clock select 01 (bit 3, period 16)
+        bus.write8(REG_TAC, 0x05);
+        bus.write8(REG_TIMA, 0x00);
+
+        // Step to just before bit 3 is set
+        bus.step(7);
+        assert_eq!(bus.read8(REG_TIMA), 0x00, "TIMA should not increment yet");
+
+        // Step to set bit 3
+        bus.step(1);
+        assert_eq!(bus.system_counter & (1 << 3), 1 << 3, "Bit 3 should be set");
+
+        // Writing to DIV resets system counter, causing falling edge on bit 3
+        bus.write8(REG_DIV, 0x00);
+
+        // This should have caused TIMA to increment due to falling edge
+        assert_eq!(
+            bus.read8(REG_TIMA),
+            0x01,
+            "DIV reset should trigger falling edge increment"
+        );
+    }
+
+    #[test]
+    fn tac_write_changing_clock_can_trigger_edge() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Set system counter to have bit 9 set, bit 3 clear
+        // System counter = 0x0200 (bit 9 set)
+        bus.step(512);
+        assert!(bus.system_counter >= 512, "System counter should be >= 512");
+
+        bus.write8(REG_TIMA, 0x00);
+
+        // Enable timer with clock select 00 (bit 9, period 1024)
+        bus.write8(REG_TAC, 0x04);
+
+        // Now change to clock select 01 (bit 3, period 16)
+        // Bit 9 is set, bit 3 is clear -> falling edge from 1 to 0
+        bus.write8(REG_TAC, 0x05);
+
+        // Should have incremented due to falling edge
+        assert_eq!(
+            bus.read8(REG_TIMA),
+            0x01,
+            "Changing TAC clock select should trigger falling edge"
+        );
+    }
+
+    #[test]
+    fn timer_disabled_no_increment() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Timer disabled (TAC bit 2 = 0)
+        bus.write8(REG_TAC, 0x01); // Clock select 01, but disabled
+        bus.write8(REG_TIMA, 0x00);
+
+        // Step many cycles
+        bus.step(1000);
+
+        // TIMA should not increment when disabled
+        assert_eq!(
+            bus.read8(REG_TIMA),
+            0x00,
+            "TIMA should not increment when disabled"
+        );
+    }
+
+    #[test]
+    fn div_always_counts_when_timer_disabled() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Disable timer
+        bus.write8(REG_TAC, 0x00);
+
+        // DIV should still count
+        bus.step(256);
+        assert_eq!(
+            bus.read8(REG_DIV),
+            0x01,
+            "DIV should count even when timer disabled"
+        );
+
+        bus.step(256);
+        assert_eq!(bus.read8(REG_DIV), 0x02, "DIV continues counting");
+    }
+
+    #[test]
+    fn timer_periods_are_correct() {
+        let test_cases = [
+            (0x04, 1024, "Clock 00"), // Bit 9
+            (0x05, 16, "Clock 01"),   // Bit 3
+            (0x06, 64, "Clock 10"),   // Bit 5
+            (0x07, 256, "Clock 11"),  // Bit 7
+        ];
+
+        for (tac_value, period, desc) in test_cases {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            bus.write8(REG_TAC, tac_value);
+            bus.write8(REG_TIMA, 0x00);
+
+            // Step period cycles - should increment once
+            bus.step(period);
+            assert_eq!(
+                bus.read8(REG_TIMA),
+                0x01,
+                "{}: TIMA should increment after {} cycles",
+                desc,
+                period
+            );
+
+            // Step period cycles again
+            bus.step(period);
+            assert_eq!(
+                bus.read8(REG_TIMA),
+                0x02,
+                "{}: TIMA should increment twice after {} cycles",
+                desc,
+                period * 2
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2005,7 +2482,8 @@ mod proptests {
             bus.write8(REG_TAC, 0x05); // Enable timer, 16 cycle period
             bus.write8(REG_IF, 0x00);  // Clear interrupts
 
-            bus.step(16); // One timer increment
+            // Step 17 cycles: overflow on cycle 16, TMA reload on cycle 17
+            bus.step(17);
 
             let tima = bus.read8(REG_TIMA);
             let if_reg = bus.read8(REG_IF);
