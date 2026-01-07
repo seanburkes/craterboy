@@ -21,6 +21,15 @@ const DMG_PALETTE: [[u8; 3]; 4] = [
     [0x08, 0x18, 0x20],
 ];
 
+/// Convert CGB 15-bit BGR555 color to RGB888
+fn cgb_color_to_rgb(color_low: u8, color_high: u8) -> [u8; 3] {
+    let color = ((color_high as u16) << 8) | (color_low as u16);
+    let r = ((color & 0x001F) as u8) << 3;
+    let g = (((color & 0x03E0) >> 5) as u8) << 3;
+    let b = (((color & 0x7C00) >> 10) as u8) << 3;
+    [r, g, b]
+}
+
 #[derive(Debug)]
 pub struct Ppu {
     cycle_counter: u32,
@@ -74,8 +83,13 @@ impl Ppu {
         let bgp = bus.read8(REG_BGP);
         let wy = bus.read8(REG_WY);
         let wx = bus.read8(REG_WX);
-        let vram = bus.vram();
-        if vram.len() < VRAM_SIZE {
+        let vram_bank0 = bus.vram_bank0();
+        let vram_bank1 = bus.vram_bank1();
+        let cgb_mode = bus.is_cgb();
+        let bg_palette_data = bus.bg_palette_data();
+        let ob_palette_data = bus.ob_palette_data();
+
+        if vram_bank0.len() < VRAM_SIZE {
             self.clear_frame(framebuffer, self.palette[0]);
             return;
         }
@@ -126,32 +140,86 @@ impl Ppu {
                         // Out of bounds tilemap access, skip this pixel
                         continue;
                     }
-                    let tile_id = vram[tile_map_base + map_index];
+                    let tile_id = vram_bank0[tile_map_base + map_index];
+
+                    // Read tile attributes from VRAM bank 1 (CGB only)
+                    let tile_attr = if cgb_mode {
+                        vram_bank1[tile_map_base + map_index]
+                    } else {
+                        0
+                    };
+
+                    // Parse tile attributes (CGB)
+                    let bg_palette_num = tile_attr & 0x07;
+                    let vram_bank = (tile_attr >> 3) & 0x01;
+                    let x_flip = (tile_attr >> 5) & 0x01 != 0;
+                    let y_flip = (tile_attr >> 6) & 0x01 != 0;
+                    let bg_to_oam_priority = (tile_attr >> 7) & 0x01 != 0;
+
                     let tile_offset = if use_unsigned {
                         (tile_id as usize) * TILE_BYTES
                     } else {
                         let signed = tile_id as i8 as i16;
                         (0x1000i16 + signed * 16) as usize
                     };
-                    let row = tile_offset + line_y * 2;
-                    let lo = vram[row];
-                    let hi = vram[row + 1];
-                    let bit = 7 - line_x;
+
+                    // Apply Y flip
+                    let flipped_line_y = if y_flip { 7 - line_y } else { line_y };
+
+                    let row = tile_offset + flipped_line_y * 2;
+                    let tile_vram = if vram_bank == 1 {
+                        vram_bank1
+                    } else {
+                        vram_bank0
+                    };
+                    let lo = tile_vram[row];
+                    let hi = tile_vram[row + 1];
+
+                    // Apply X flip
+                    let bit = if x_flip { line_x } else { 7 - line_x };
                     let color_id = ((hi >> bit) & 0x1) << 1 | ((lo >> bit) & 0x1);
-                    let palette_index = (bgp >> (color_id * 2)) & 0x03;
-                    let color = self.palette[palette_index as usize];
+
+                    let color = if cgb_mode {
+                        // Use CGB palette
+                        let palette_offset =
+                            (bg_palette_num as usize) * 8 + (color_id as usize) * 2;
+                        cgb_color_to_rgb(
+                            bg_palette_data[palette_offset],
+                            bg_palette_data[palette_offset + 1],
+                        )
+                    } else {
+                        // Use DMG palette
+                        let palette_index = (bgp >> (color_id * 2)) & 0x03;
+                        self.palette[palette_index as usize]
+                    };
+
                     let idx = (y * width + x) * 3;
                     pixels[idx] = color[0];
                     pixels[idx + 1] = color[1];
                     pixels[idx + 2] = color[2];
-                    // Window pixels should use their color_id for priority, not BG
-                    self.bg_priority[y * width + x] = color_id;
+
+                    // Store priority info for sprite rendering
+                    // In CGB mode: store color_id and bg_to_oam_priority flag
+                    // Bit 7: bg_to_oam_priority, bits 1-0: color_id
+                    let priority_value = if bg_to_oam_priority {
+                        0x80 | color_id
+                    } else {
+                        color_id
+                    };
+                    self.bg_priority[y * width + x] = priority_value;
                 }
             }
         }
 
         if sprites_enabled {
-            self.render_sprites(bus, framebuffer, sprite_height);
+            self.render_sprites(
+                bus,
+                framebuffer,
+                sprite_height,
+                cgb_mode,
+                bg_palette_data,
+                ob_palette_data,
+            );
         }
     }
 
@@ -168,10 +236,19 @@ impl Ppu {
         self.bg_priority.fill(0);
     }
 
-    fn render_sprites(&self, bus: &Bus, framebuffer: &mut Framebuffer, sprite_height: usize) {
+    fn render_sprites(
+        &self,
+        bus: &Bus,
+        framebuffer: &mut Framebuffer,
+        sprite_height: usize,
+        cgb_mode: bool,
+        _bg_palette_data: &[u8; 64],
+        ob_palette_data: &[u8; 64],
+    ) {
         let obp0 = bus.read8(REG_OBP0);
         let obp1 = bus.read8(REG_OBP1);
-        let vram = bus.vram();
+        let vram_bank0 = bus.vram_bank0();
+        let vram_bank1 = bus.vram_bank1();
         let pixels = framebuffer.as_mut_slice();
         let width = FRAME_WIDTH;
         let height = FRAME_HEIGHT;
@@ -189,8 +266,12 @@ impl Ppu {
 
             let y_flip = attr & 0x40 != 0;
             let x_flip = attr & 0x20 != 0;
-            let palette = if attr & 0x10 != 0 { obp1 } else { obp0 };
+            let dmg_palette = if attr & 0x10 != 0 { obp1 } else { obp0 };
             let priority = attr & 0x80 != 0;
+
+            // CGB attributes
+            let cgb_palette_num = attr & 0x07;
+            let cgb_vram_bank = (attr >> 3) & 0x01;
 
             for row in 0..sprite_height {
                 let screen_y = y + row as i16;
@@ -207,8 +288,13 @@ impl Ppu {
                     }
                 }
                 let row_addr = tile_index * TILE_BYTES + tile_row * 2;
-                let lo = vram[row_addr];
-                let hi = vram[row_addr + 1];
+                let tile_vram = if cgb_mode && cgb_vram_bank == 1 {
+                    vram_bank1
+                } else {
+                    vram_bank0
+                };
+                let lo = tile_vram[row_addr];
+                let hi = tile_vram[row_addr + 1];
                 for col in 0..8 {
                     let screen_x = x + col as i16;
                     if screen_x < 0 || screen_x >= width as i16 {
@@ -219,14 +305,47 @@ impl Ppu {
                     if color_id == 0 {
                         continue;
                     }
-                    let palette_index = (palette >> (color_id * 2)) & 0x03;
-                    let color = self.palette[palette_index as usize];
-                    let idx = (screen_y as usize * width + screen_x as usize) * 3;
-                    if priority
-                        && self.bg_priority[screen_y as usize * width + screen_x as usize] != 0
-                    {
+
+                    let bg_priority_info =
+                        self.bg_priority[screen_y as usize * width + screen_x as usize];
+                    let bg_color_id = bg_priority_info & 0x03;
+                    let bg_to_oam_priority = (bg_priority_info & 0x80) != 0;
+
+                    // Priority logic:
+                    // In CGB mode:
+                    //   - If BG tile has bg_to_oam_priority set and bg_color_id != 0, BG wins
+                    //   - Otherwise, OAM priority flag determines behavior
+                    // In DMG mode:
+                    //   - OAM priority flag determines behavior (sprite behind BG if priority=1 and bg_color_id != 0)
+                    let sprite_behind_bg = if cgb_mode {
+                        // CGB priority:
+                        // 1. If BG tile has priority flag and BG color is non-zero, BG wins
+                        // 2. Otherwise, sprite priority flag determines if sprite is behind BG
+                        (priority || bg_to_oam_priority) && bg_color_id != 0
+                    } else {
+                        // DMG priority: sprite priority flag
+                        priority && bg_color_id != 0
+                    };
+
+                    if sprite_behind_bg {
                         continue;
                     }
+
+                    let color = if cgb_mode {
+                        // Use CGB palette
+                        let palette_offset =
+                            (cgb_palette_num as usize) * 8 + (color_id as usize) * 2;
+                        cgb_color_to_rgb(
+                            ob_palette_data[palette_offset],
+                            ob_palette_data[palette_offset + 1],
+                        )
+                    } else {
+                        // Use DMG palette
+                        let palette_index = (dmg_palette >> (color_id * 2)) & 0x03;
+                        self.palette[palette_index as usize]
+                    };
+
+                    let idx = (screen_y as usize * width + screen_x as usize) * 3;
                     pixels[idx] = color[0];
                     pixels[idx + 1] = color[1];
                     pixels[idx + 2] = color[2];
