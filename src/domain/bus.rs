@@ -1,6 +1,7 @@
 use super::{Apu, Cartridge, Mbc, MbcError, RtcMode};
 
-const BOOT_ROM_SIZE: usize = 0x100;
+const DMG_BOOT_ROM_SIZE: usize = 0x100;
+const CGB_BOOT_ROM_SIZE: usize = 0x900;
 const VRAM_SIZE: usize = 0x2000;
 const WRAM_BANK_SIZE: usize = 0x1000;
 const WRAM_BANKS: usize = 8;
@@ -355,10 +356,22 @@ impl Bus {
     pub fn read8(&self, addr: u16) -> u8 {
         if self.boot_rom_enabled
             && let Some(boot_rom) = &self.boot_rom
-            && (addr as usize) < BOOT_ROM_SIZE
-            && boot_rom.len() >= BOOT_ROM_SIZE
         {
-            return boot_rom[addr as usize];
+            // CGB boot ROM: 0x900 bytes mapping to two regions
+            // Region 1: 0x0000-0x00FF (first 0x100 bytes of boot ROM)
+            // Region 2: 0x0200-0x08FF (bytes 0x100-0x8FF of boot ROM)
+            if boot_rom.len() >= CGB_BOOT_ROM_SIZE {
+                // CGB boot ROM (0x900 bytes)
+                if addr <= 0x00FF {
+                    return boot_rom[addr as usize];
+                } else if (0x0200..=0x08FF).contains(&addr) {
+                    let offset = addr - 0x0200 + 0x100;
+                    return boot_rom[offset as usize];
+                }
+            } else if boot_rom.len() >= DMG_BOOT_ROM_SIZE && addr < DMG_BOOT_ROM_SIZE as u16 {
+                // DMG boot ROM (0x100 bytes)
+                return boot_rom[addr as usize];
+            }
         }
 
         match addr {
@@ -1116,10 +1129,10 @@ impl Bus {
 #[cfg(test)]
 mod tests {
     use super::{
-        BOOT_ROM_SIZE, Bus, DMA_TOTAL_CYCLES, IF_TIMER, REG_BGP, REG_BGPD, REG_BGPI, REG_DIV,
+        Bus, DMA_TOTAL_CYCLES, DMG_BOOT_ROM_SIZE, IF_TIMER, REG_BGP, REG_BGPD, REG_BGPI, REG_DIV,
         REG_DMA, REG_HDMA1, REG_HDMA2, REG_HDMA3, REG_HDMA4, REG_HDMA5, REG_IF, REG_JOYP, REG_KEY0,
         REG_KEY1, REG_LCDC, REG_LY, REG_LYC, REG_OBP0, REG_OBP1, REG_OBPD, REG_OBPI, REG_SCX,
-        REG_SCY, REG_STAT, REG_SVBK, REG_TAC, REG_TIMA, REG_TMA, REG_VBK, REG_WX, REG_WY,
+        REG_SCY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA, REG_VBK, REG_WX, REG_WY,
     };
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
@@ -1146,7 +1159,7 @@ mod tests {
         rom[0x0147] = 0x00;
         let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
 
-        let boot_rom = vec![0xAA; BOOT_ROM_SIZE];
+        let boot_rom = vec![0xAA; DMG_BOOT_ROM_SIZE];
         let mut bus = Bus::with_boot_rom(cartridge, Some(boot_rom)).expect("bus");
 
         assert_eq!(bus.read8(0x0000), 0xAA);
@@ -1164,7 +1177,7 @@ mod tests {
         rom[0x0147] = 0x00;
         let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
 
-        let boot_rom = vec![0xAA; BOOT_ROM_SIZE];
+        let boot_rom = vec![0xAA; DMG_BOOT_ROM_SIZE];
         let mut bus = Bus::with_boot_rom(cartridge, Some(boot_rom)).expect("bus");
 
         // Initially not signaled
@@ -1224,7 +1237,7 @@ mod tests {
         rom[0x0147] = 0x00;
         let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
 
-        let boot_rom = vec![0xAA; BOOT_ROM_SIZE];
+        let boot_rom = vec![0xAA; DMG_BOOT_ROM_SIZE];
         let bus = Bus::with_boot_rom(cartridge, Some(boot_rom)).expect("bus");
 
         // With boot ROM, registers are zeroed (boot ROM will initialize them)
@@ -1240,6 +1253,128 @@ mod tests {
         );
         assert_eq!(bus.read8(REG_BGP), 0x00, "BGP should be 0x00 with boot ROM");
         assert_eq!(bus.read8(REG_DMA), 0x00, "DMA should be 0x00 with boot ROM");
+    }
+
+    #[test]
+    fn cgb_boot_rom_maps_to_two_regions() {
+        // Create cartridge with distinct ROM pattern
+        let mut rom = vec![0x55; ROM_BANK_SIZE];
+        rom[0x0143] = 0x80; // CGB supported
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+
+        // CGB boot ROM is 0x900 bytes (2304 bytes)
+        // Maps to: 0x0000-0x00FF (256 bytes) and 0x0200-0x08FF (1792 bytes)
+        let mut boot_rom = vec![0; 0x900];
+        boot_rom[..0x100].fill(0xAA); // First 256 bytes
+        boot_rom[0x100..].fill(0xBB); // Remaining 1792 bytes (maps to 0x0200-0x08FF)
+
+        let mut bus = Bus::with_boot_rom(cartridge, Some(boot_rom)).expect("bus");
+
+        // Region 1: 0x0000-0x00FF (first 256 bytes of boot ROM)
+        assert_eq!(bus.read8(0x0000), 0xAA, "Boot ROM region 1 start");
+        assert_eq!(bus.read8(0x00FF), 0xAA, "Boot ROM region 1 end");
+
+        // Gap: 0x0100-0x01FF (cartridge ROM should be visible)
+        assert_eq!(bus.read8(0x0100), 0x55, "Gap before region 2 start");
+        assert_eq!(bus.read8(0x01FF), 0x55, "Gap before region 2 end");
+
+        // Region 2: 0x0200-0x08FF (bytes 0x100-0x8FF of boot ROM)
+        assert_eq!(bus.read8(0x0200), 0xBB, "Boot ROM region 2 start");
+        assert_eq!(bus.read8(0x08FF), 0xBB, "Boot ROM region 2 end");
+
+        // After 0x08FF: cartridge ROM should be visible
+        assert_eq!(bus.read8(0x0900), 0x55, "After boot ROM");
+
+        // Disable boot ROM via 0xFF50
+        bus.write8(0xFF50, 0x01);
+        assert!(!bus.boot_rom_enabled());
+
+        // All addresses should now show cartridge ROM
+        assert_eq!(bus.read8(0x0000), 0x55, "After disable: region 1");
+        assert_eq!(bus.read8(0x0200), 0x55, "After disable: region 2");
+    }
+
+    #[test]
+    fn cgb_boot_rom_exactly_0x900_bytes() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0143] = 0x80; // CGB supported
+        rom[0x0147] = 0x00;
+        rom.fill(0x77);
+        rom[0x0143] = 0x80;
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+
+        // Create 0x900 byte boot ROM with distinct patterns
+        let mut boot_rom = vec![0; 0x900];
+        boot_rom[..0x100].fill(0x01);
+        boot_rom[0x100..0x900].fill(0x02);
+
+        let bus = Bus::with_boot_rom(cartridge, Some(boot_rom)).expect("bus");
+
+        // Verify first region (0x0000-0x00FF)
+        assert_eq!(bus.read8(0x0000), 0x01);
+        assert_eq!(bus.read8(0x00FF), 0x01);
+
+        // Verify second region (0x0200-0x08FF)
+        assert_eq!(bus.read8(0x0200), 0x02);
+        assert_eq!(bus.read8(0x08FF), 0x02);
+
+        // Verify gaps show cartridge ROM
+        assert_eq!(bus.read8(0x0100), 0x77);
+        assert_eq!(bus.read8(0x0900), 0x77);
+    }
+
+    #[test]
+    fn dmg_boot_rom_only_maps_first_256_bytes() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0143] = 0x00; // DMG only
+        rom[0x0147] = 0x00;
+        rom.fill(0x33);
+        rom[0x0143] = 0x00;
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+
+        // DMG boot ROM is 0x100 bytes (256 bytes)
+        let boot_rom = vec![0xDD; 0x100];
+        let bus = Bus::with_boot_rom(cartridge, Some(boot_rom)).expect("bus");
+
+        // Boot ROM visible at 0x0000-0x00FF
+        assert_eq!(bus.read8(0x0000), 0xDD);
+        assert_eq!(bus.read8(0x00FF), 0xDD);
+
+        // Cartridge ROM visible everywhere else
+        assert_eq!(bus.read8(0x0100), 0x33);
+        assert_eq!(bus.read8(0x0200), 0x33);
+        assert_eq!(bus.read8(0x08FF), 0x33);
+    }
+
+    #[test]
+    fn cgb_boot_rom_disable_clears_both_regions() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0143] = 0x80; // CGB supported
+        rom[0x0147] = 0x00;
+        rom.fill(0x99);
+        rom[0x0143] = 0x80;
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+
+        let mut boot_rom = vec![0; 0x900];
+        boot_rom[..0x100].fill(0xCC);
+        boot_rom[0x100..].fill(0xDD);
+
+        let mut bus = Bus::with_boot_rom(cartridge, Some(boot_rom)).expect("bus");
+
+        // Before disable: boot ROM visible
+        assert_eq!(bus.read8(0x0050), 0xCC);
+        assert_eq!(bus.read8(0x0400), 0xDD);
+
+        // Disable boot ROM
+        bus.write8(0xFF50, 0x01);
+
+        // After disable: cartridge ROM visible in both regions
+        assert_eq!(bus.read8(0x0050), 0x99);
+        assert_eq!(bus.read8(0x0400), 0x99);
     }
 
     #[test]
@@ -2684,7 +2819,7 @@ mod proptests {
             let mut rom = vec![0x42; ROM_BANK_SIZE];
             rom[0x0147] = 0x00;
             let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
-            let boot_rom = vec![0xAA; BOOT_ROM_SIZE];
+            let boot_rom = vec![0xAA; DMG_BOOT_ROM_SIZE];
             let mut bus = Bus::with_boot_rom(cartridge, Some(boot_rom)).expect("bus");
 
             prop_assert!(bus.boot_rom_enabled(), "Boot ROM should start enabled");
