@@ -870,6 +870,12 @@ impl Cpu {
                 let opcode = self.fetch8(bus);
                 Ok(self.exec_cb(opcode, bus))
             }
+            // Illegal opcodes - behave as NOPs on real hardware
+            // These are: 0xD3, 0xDB, 0xDD, 0xE3, 0xE4, 0xEB, 0xEC, 0xED, 0xF4, 0xFC, 0xFD
+            0xD3 | 0xDB | 0xDD | 0xE3 | 0xE4 | 0xEB | 0xEC | 0xED | 0xF4 | 0xFC | 0xFD => {
+                // Illegal opcodes behave as 1-byte NOPs consuming 4 cycles
+                Ok(4)
+            }
             _ => Err(CpuError::UnimplementedOpcode(opcode)),
         };
 
@@ -1360,17 +1366,20 @@ mod tests {
     }
 
     #[test]
-    fn cpu_jumps_relative() {
+    fn cpu_handles_ei_delay() {
         let mut rom = vec![0; ROM_BANK_SIZE];
-        rom[0x0000] = 0x18;
-        rom[0x0001] = 0x02;
-        rom[0x0002] = 0x00;
-        rom[0x0003] = 0x00;
+        rom[0x0000] = 0xFB;
+        rom[0x0001] = 0x00;
         let mut bus = bus_with_rom(rom);
         let mut cpu = Cpu::new();
+        bus.write8(REG_IE, 0x01);
+        bus.write8(REG_IF, 0x01);
 
-        cpu.step(&mut bus).expect("jr");
-        assert_eq!(cpu.pc(), 0x0004);
+        cpu.step(&mut bus).expect("ei");
+        assert!(!cpu.ime());
+
+        cpu.step(&mut bus).expect("nop");
+        assert!(cpu.ime());
     }
 
     #[test]
@@ -2502,6 +2511,42 @@ mod tests {
         assert_eq!(cycles, 8);
         assert_eq!(cpu.pc(), 0x0001);
         assert_eq!(cpu.sp(), sp_start);
+    }
+
+    #[test]
+    fn cpu_handles_illegal_opcodes_as_nops() {
+        let illegal_opcodes = [
+            0xD3, 0xDB, 0xDD, 0xE3, 0xE4, 0xEB, 0xEC, 0xED, 0xF4, 0xFC, 0xFD,
+        ];
+
+        for &opcode in &illegal_opcodes {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0000] = opcode;
+            let mut bus = bus_with_rom(rom);
+            let mut cpu = Cpu::new();
+            let initial_regs = cpu.regs().af();
+
+            let cycles = cpu.step(&mut bus).expect("illegal opcode should not error");
+
+            // Illegal opcodes act as 1-byte NOPs with 4 cycles
+            assert_eq!(
+                cycles, 4,
+                "Illegal opcode 0x{:02X} should take 4 cycles",
+                opcode
+            );
+            assert_eq!(
+                cpu.pc(),
+                1,
+                "Illegal opcode 0x{:02X} should advance PC by 1",
+                opcode
+            );
+            assert_eq!(
+                cpu.regs().af(),
+                initial_regs,
+                "Illegal opcode 0x{:02X} should not modify registers",
+                opcode
+            );
+        }
     }
 }
 
