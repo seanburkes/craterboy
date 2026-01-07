@@ -2,7 +2,8 @@ use super::{Apu, Cartridge, Mbc, MbcError, RtcMode};
 
 const BOOT_ROM_SIZE: usize = 0x100;
 const VRAM_SIZE: usize = 0x2000;
-const WRAM_SIZE: usize = 0x2000;
+const WRAM_BANK_SIZE: usize = 0x1000;
+const WRAM_BANKS: usize = 8;
 const OAM_SIZE: usize = 0xA0;
 const IO_SIZE: usize = 0x80;
 const HRAM_SIZE: usize = 0x7F;
@@ -64,6 +65,7 @@ const REG_BGPI: u16 = 0xFF68;
 const REG_BGPD: u16 = 0xFF69;
 const REG_OBPI: u16 = 0xFF6A;
 const REG_OBPD: u16 = 0xFF6B;
+const REG_SVBK: u16 = 0xFF70;
 const IF_VBLANK: u8 = 0x01;
 const IF_STAT: u8 = 0x02;
 const IF_TIMER: u8 = 0x04;
@@ -97,7 +99,8 @@ pub struct Bus {
     boot_rom_just_disabled: bool,
     vram_bank: u8,
     vram: [Vec<u8>; 2],
-    wram: Vec<u8>,
+    wram_bank: u8,
+    wram: [Vec<u8>; WRAM_BANKS],
     oam: Vec<u8>,
     io: Vec<u8>,
     hram: Vec<u8>,
@@ -215,7 +218,17 @@ impl Bus {
             boot_rom_just_disabled: false,
             vram_bank: 0,
             vram: [vec![0; VRAM_SIZE], vec![0; VRAM_SIZE]],
-            wram: vec![0; WRAM_SIZE],
+            wram_bank: 1,
+            wram: [
+                vec![0; WRAM_BANK_SIZE],
+                vec![0; WRAM_BANK_SIZE],
+                vec![0; WRAM_BANK_SIZE],
+                vec![0; WRAM_BANK_SIZE],
+                vec![0; WRAM_BANK_SIZE],
+                vec![0; WRAM_BANK_SIZE],
+                vec![0; WRAM_BANK_SIZE],
+                vec![0; WRAM_BANK_SIZE],
+            ],
             oam: vec![0; OAM_SIZE],
             io,
             hram: vec![0; HRAM_SIZE],
@@ -292,6 +305,10 @@ impl Bus {
         &self.vram[1]
     }
 
+    pub fn wram_bank(&self) -> u8 {
+        self.wram_bank
+    }
+
     pub fn bg_palette_data(&self) -> &[u8; 64] {
         &self.bg_palette_data
     }
@@ -350,8 +367,14 @@ impl Bus {
                 self.vram[self.vram_bank as usize][(addr as usize - 0x8000) % VRAM_SIZE]
             }
             0xA000..=0xBFFF => self.mbc.read8(&self.cartridge, addr),
-            0xC000..=0xDFFF => self.wram[(addr as usize - 0xC000) % WRAM_SIZE],
-            0xE000..=0xFDFF => self.wram[(addr as usize - 0xE000) % WRAM_SIZE],
+            0xC000..=0xCFFF => self.wram[0][(addr as usize - 0xC000) % WRAM_BANK_SIZE],
+            0xD000..=0xDFFF => {
+                self.wram[self.wram_bank as usize][(addr as usize - 0xD000) % WRAM_BANK_SIZE]
+            }
+            0xE000..=0xEFFF => self.wram[0][(addr as usize - 0xE000) % WRAM_BANK_SIZE],
+            0xF000..=0xFDFF => {
+                self.wram[self.wram_bank as usize][(addr as usize - 0xF000) % WRAM_BANK_SIZE]
+            }
             0xFE00..=0xFE9F => self.oam[(addr as usize - 0xFE00) % OAM_SIZE],
             0xFEA0..=0xFEFF => OPEN_BUS,
             0xFF00..=0xFF7F => self.read_io(addr),
@@ -372,8 +395,16 @@ impl Bus {
                 self.vram[self.vram_bank as usize][(addr as usize - 0x8000) % VRAM_SIZE] = value
             }
             0xA000..=0xBFFF => self.mbc.write8(&mut self.cartridge, addr, value),
-            0xC000..=0xDFFF => self.wram[(addr as usize - 0xC000) % WRAM_SIZE] = value,
-            0xE000..=0xFDFF => self.wram[(addr as usize - 0xE000) % WRAM_SIZE] = value,
+            0xC000..=0xCFFF => self.wram[0][(addr as usize - 0xC000) % WRAM_BANK_SIZE] = value,
+            0xD000..=0xDFFF => {
+                self.wram[self.wram_bank as usize][(addr as usize - 0xD000) % WRAM_BANK_SIZE] =
+                    value
+            }
+            0xE000..=0xEFFF => self.wram[0][(addr as usize - 0xE000) % WRAM_BANK_SIZE] = value,
+            0xF000..=0xFDFF => {
+                self.wram[self.wram_bank as usize][(addr as usize - 0xF000) % WRAM_BANK_SIZE] =
+                    value
+            }
             0xFE00..=0xFE9F => self.oam[(addr as usize - 0xFE00) % OAM_SIZE] = value,
             0xFEA0..=0xFEFF => {}
             0xFF00..=0xFF7F => self.write_io(addr, value),
@@ -565,6 +596,7 @@ impl Bus {
             REG_BGPD => self.read_bgpdata(),
             REG_OBPI => self.read_obpi(),
             REG_OBPD => self.read_obpdata(),
+            REG_SVBK => self.wram_bank | 0xF8,
             0xFF10..=0xFF14
             | 0xFF16..=0xFF19
             | 0xFF1A..=0xFF1E
@@ -689,6 +721,13 @@ impl Bus {
             REG_BGPD => self.write_bgpdata(value),
             REG_OBPI => self.write_obpi(value),
             REG_OBPD => self.write_obpdata(value),
+            REG_SVBK => {
+                if self.cgb_mode {
+                    // Bits 0-2 select bank (0 and 1 both map to bank 1)
+                    let bank = value & 0x07;
+                    self.wram_bank = if bank == 0 { 1 } else { bank };
+                }
+            }
             0xFF10..=0xFF14
             | 0xFF16..=0xFF19
             | 0xFF1A..=0xFF1E
@@ -1080,7 +1119,7 @@ mod tests {
         BOOT_ROM_SIZE, Bus, DMA_TOTAL_CYCLES, IF_TIMER, REG_BGP, REG_BGPD, REG_BGPI, REG_DIV,
         REG_DMA, REG_HDMA1, REG_HDMA2, REG_HDMA3, REG_HDMA4, REG_HDMA5, REG_IF, REG_JOYP, REG_KEY0,
         REG_KEY1, REG_LCDC, REG_LY, REG_LYC, REG_OBP0, REG_OBP1, REG_OBPD, REG_OBPI, REG_SCX,
-        REG_SCY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA, REG_VBK, REG_WX, REG_WY,
+        REG_SCY, REG_STAT, REG_SVBK, REG_TAC, REG_TIMA, REG_TMA, REG_VBK, REG_WX, REG_WY,
     };
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
@@ -2655,6 +2694,226 @@ mod proptests {
 
             prop_assert!(!bus.boot_rom_enabled(), "Boot ROM should be disabled");
             prop_assert_eq!(bus.read8(0x0000), 0x42, "Should read cartridge ROM");
+        }
+    }
+
+    // === WRAM Banking Tests (CGB) ===
+
+    #[test]
+    fn wram_bank0_fixed_at_c000_cfff() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Write to bank 0 (0xC000-0xCFFF)
+        bus.write8(0xC000, 0x42);
+        bus.write8(0xCFFF, 0x99);
+
+        // Switch WRAM bank
+        bus.write8(REG_SVBK, 0x02);
+
+        // Bank 0 should still be accessible at 0xC000-0xCFFF
+        assert_eq!(bus.read8(0xC000), 0x42);
+        assert_eq!(bus.read8(0xCFFF), 0x99);
+    }
+
+    #[test]
+    fn wram_banks_1_7_switchable_at_d000_dfff() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Write different values to each bank at 0xD000
+        for bank in 1..=7 {
+            bus.write8(REG_SVBK, bank);
+            bus.write8(0xD000, 0x10 + bank);
+        }
+
+        // Read back and verify isolation
+        for bank in 1..=7 {
+            bus.write8(REG_SVBK, bank);
+            assert_eq!(
+                bus.read8(0xD000),
+                0x10 + bank,
+                "Bank {} should have its own data",
+                bank
+            );
+        }
+    }
+
+    #[test]
+    fn svbk_register_reads_current_bank() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Default bank should be 1
+        assert_eq!(bus.read8(REG_SVBK) & 0x07, 0x01);
+
+        // Switch to bank 3
+        bus.write8(REG_SVBK, 0x03);
+        assert_eq!(bus.read8(REG_SVBK) & 0x07, 0x03);
+
+        // High bits should be set
+        assert_eq!(bus.read8(REG_SVBK) & 0xF8, 0xF8);
+    }
+
+    #[test]
+    fn svbk_bank_0_maps_to_bank_1() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Write to bank 1 explicitly
+        bus.write8(REG_SVBK, 0x01);
+        bus.write8(0xD000, 0xAB);
+
+        // Writing 0 to SVBK should map to bank 1
+        bus.write8(REG_SVBK, 0x00);
+        assert_eq!(bus.read8(REG_SVBK) & 0x07, 0x01, "Bank 0 maps to bank 1");
+        assert_eq!(bus.read8(0xD000), 0xAB, "Bank 0 reads bank 1 data");
+
+        // Write through "bank 0"
+        bus.write8(0xD000, 0xCD);
+
+        // Switch back to explicit bank 1
+        bus.write8(REG_SVBK, 0x01);
+        assert_eq!(bus.read8(0xD000), 0xCD, "Bank 1 sees bank 0 writes");
+    }
+
+    #[test]
+    fn wram_echo_ram_mirrors_banks() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Bank 0 echo (0xE000-0xEFFF mirrors 0xC000-0xCFFF)
+        bus.write8(0xC100, 0x12);
+        assert_eq!(bus.read8(0xE100), 0x12);
+
+        // Switchable bank echo (0xF000-0xFDFF mirrors 0xD000-0xDFFF)
+        bus.write8(REG_SVBK, 0x03);
+        bus.write8(0xD200, 0x34);
+        assert_eq!(bus.read8(0xF200), 0x34);
+
+        // Switch bank and verify echo follows
+        bus.write8(REG_SVBK, 0x05);
+        bus.write8(0xD200, 0x56);
+        assert_eq!(bus.read8(0xF200), 0x56);
+
+        // Previous bank data should be isolated
+        bus.write8(REG_SVBK, 0x03);
+        assert_eq!(bus.read8(0xF200), 0x34);
+    }
+
+    #[test]
+    fn svbk_only_works_in_cgb_mode() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x00; // DMG only
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Write to 0xD000 in default bank
+        bus.write8(0xD000, 0x42);
+
+        // Try to switch bank (should have no effect in DMG mode)
+        bus.write8(REG_SVBK, 0x05);
+
+        // Should still read bank 1 data
+        assert_eq!(bus.read8(0xD000), 0x42);
+
+        // SVBK register should still report the written value
+        // (even though it doesn't affect memory mapping)
+        assert_eq!(bus.read8(REG_SVBK) & 0x07, 0x01);
+    }
+
+    #[test]
+    fn wram_full_range_test() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Test full bank 0 range
+        bus.write8(0xC000, 0x01);
+        bus.write8(0xC800, 0x02);
+        bus.write8(0xCFFF, 0x03);
+        assert_eq!(bus.read8(0xC000), 0x01);
+        assert_eq!(bus.read8(0xC800), 0x02);
+        assert_eq!(bus.read8(0xCFFF), 0x03);
+
+        // Test full switchable bank range
+        bus.write8(REG_SVBK, 0x04);
+        bus.write8(0xD000, 0x11);
+        bus.write8(0xD800, 0x12);
+        bus.write8(0xDFFF, 0x13);
+        assert_eq!(bus.read8(0xD000), 0x11);
+        assert_eq!(bus.read8(0xD800), 0x12);
+        assert_eq!(bus.read8(0xDFFF), 0x13);
+    }
+
+    // Property: WRAM banking isolates data between banks
+    proptest! {
+        #[test]
+        fn prop_wram_banks_isolated(bank1 in 1u8..=7, bank2 in 1u8..=7, value1 in any::<u8>(), value2 in any::<u8>()) {
+            prop_assume!(bank1 != bank2);
+
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            rom[0x0143] = 0x80; // CGB supported
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            // Write to bank1
+            bus.write8(REG_SVBK, bank1);
+            bus.write8(0xD000, value1);
+
+            // Write to bank2
+            bus.write8(REG_SVBK, bank2);
+            bus.write8(0xD000, value2);
+
+            // Read back bank1
+            bus.write8(REG_SVBK, bank1);
+            prop_assert_eq!(bus.read8(0xD000), value1, "Bank {} data should be isolated", bank1);
+
+            // Read back bank2
+            bus.write8(REG_SVBK, bank2);
+            prop_assert_eq!(bus.read8(0xD000), value2, "Bank {} data should be isolated", bank2);
+        }
+    }
+
+    // Property: WRAM bank 0 is always accessible regardless of SVBK
+    proptest! {
+        #[test]
+        fn prop_wram_bank0_always_accessible(bank in 0u8..=7, addr_offset in 0u16..0x1000, value in any::<u8>()) {
+            let mut rom = vec![0; ROM_BANK_SIZE];
+            rom[0x0147] = 0x00;
+            rom[0x0143] = 0x80; // CGB supported
+            let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+            let mut bus = Bus::new(cartridge).expect("bus");
+
+            let addr = 0xC000 + addr_offset;
+
+            // Write to bank 0
+            bus.write8(addr, value);
+
+            // Switch WRAM bank
+            bus.write8(REG_SVBK, bank);
+
+            // Bank 0 should still be readable
+            prop_assert_eq!(bus.read8(addr), value, "Bank 0 should be accessible regardless of SVBK");
         }
     }
 }
