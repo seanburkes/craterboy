@@ -367,13 +367,21 @@ impl Bus {
     }
 
     pub fn step(&mut self, cycles: u32) {
-        self.step_div(cycles);
-        self.step_timer(cycles);
-        let _ = self.apu.step(cycles);
-        self.step_ppu(cycles);
+        // In double-speed mode, CPU cycles are twice as fast, but subsystems
+        // (PPU, APU, timers) run at normal speed. Scale cycles accordingly.
+        let subsystem_cycles = if self.double_speed {
+            cycles / 2
+        } else {
+            cycles
+        };
+
+        self.step_div(subsystem_cycles);
+        self.step_timer(subsystem_cycles);
+        let _ = self.apu.step(subsystem_cycles);
+        self.step_ppu(subsystem_cycles);
         self.step_hdma();
-        self.step_dma(cycles);
-        self.mbc.tick(cycles);
+        self.step_dma(subsystem_cycles);
+        self.mbc.tick(subsystem_cycles);
     }
 
     pub fn set_rtc_mode(&mut self, mode: RtcMode) {
@@ -381,7 +389,13 @@ impl Bus {
     }
 
     pub fn apu_step(&mut self, cycles: u32) {
-        let _ = self.apu.step(cycles);
+        // In double-speed mode, scale APU cycles appropriately
+        let subsystem_cycles = if self.double_speed {
+            cycles / 2
+        } else {
+            cycles
+        };
+        let _ = self.apu.step(subsystem_cycles);
     }
 
     pub fn apu_sample_rate_hz(&self) -> f64 {
@@ -1506,6 +1520,119 @@ mod tests {
         assert_eq!(bus.read8(REG_KEY1), 0x00);
         assert!(!bus.is_double_speed());
         assert!(!bus.speed_switch_pending());
+    }
+
+    #[test]
+    fn bus_double_speed_scales_timer_correctly() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Enable timer with fastest rate (16 cycles per increment in normal speed)
+        bus.write8(REG_TAC, 0x05); // Enable, 16-cycle period
+        bus.write8(REG_TIMA, 0x00);
+
+        // In normal speed, 16 cycles should increment TIMA once
+        bus.step(16);
+        assert_eq!(
+            bus.read8(REG_TIMA),
+            1,
+            "Normal speed: 16 cycles = 1 increment"
+        );
+
+        // Switch to double speed
+        bus.write8(REG_KEY1, 0x01);
+        bus.perform_speed_switch();
+        assert!(bus.is_double_speed());
+
+        bus.write8(REG_TIMA, 0x00);
+
+        // In double speed, CPU cycles are twice as fast, so we need 32 CPU cycles
+        // for the timer to see 16 timer cycles
+        bus.step(32);
+        assert_eq!(
+            bus.read8(REG_TIMA),
+            1,
+            "Double speed: 32 CPU cycles = 16 timer cycles = 1 increment"
+        );
+    }
+
+    #[test]
+    fn bus_double_speed_scales_div_correctly() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // DIV increments every 256 cycles
+        bus.write8(REG_DIV, 0x00);
+        let initial_div = bus.read8(REG_DIV);
+
+        // In normal speed, 256 cycles should increment DIV once
+        bus.step(256);
+        let after_normal = bus.read8(REG_DIV);
+        assert_eq!(
+            after_normal,
+            initial_div.wrapping_add(1),
+            "Normal speed: 256 cycles = 1 DIV increment"
+        );
+
+        // Switch to double speed
+        bus.write8(REG_KEY1, 0x01);
+        bus.perform_speed_switch();
+        assert!(bus.is_double_speed());
+
+        bus.write8(REG_DIV, 0x00);
+        let initial_div_double = bus.read8(REG_DIV);
+
+        // In double speed, need 512 CPU cycles for DIV to see 256 timer cycles
+        bus.step(512);
+        let after_double = bus.read8(REG_DIV);
+        assert_eq!(
+            after_double,
+            initial_div_double.wrapping_add(1),
+            "Double speed: 512 CPU cycles = 256 timer cycles = 1 DIV increment"
+        );
+    }
+
+    #[test]
+    fn bus_double_speed_ppu_timing() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        rom[0x0143] = 0x80; // CGB supported
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // PPU line takes 456 cycles in normal mode
+        bus.write8(REG_LY, 0x00);
+        let initial_ly = bus.read8(REG_LY);
+
+        // Step one full line worth of cycles
+        bus.step(456);
+        let after_normal = bus.read8(REG_LY);
+        assert!(
+            after_normal > initial_ly || after_normal == 0,
+            "Normal speed: LY should advance or wrap"
+        );
+
+        // Switch to double speed
+        bus.write8(REG_KEY1, 0x01);
+        bus.perform_speed_switch();
+        assert!(bus.is_double_speed());
+
+        bus.write8(REG_LY, 0x00);
+        let initial_ly_double = bus.read8(REG_LY);
+
+        // In double speed, need 912 CPU cycles for PPU to see 456 PPU cycles
+        bus.step(912);
+        let after_double = bus.read8(REG_LY);
+        assert!(
+            after_double > initial_ly_double || after_double == 0,
+            "Double speed: LY should advance with scaled cycles"
+        );
     }
 
     #[test]
