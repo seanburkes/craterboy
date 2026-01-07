@@ -1,0 +1,124 @@
+name: Release Build
+
+on:
+  # Manually trigger this workflow for releases
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v0.1.0)'
+        required: true
+        type: string
+  # Automatically run on version tags
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libasound2-dev \
+          libudev-dev \
+          libxcb-render0-dev \
+          libxcb-shape0-dev \
+          libxcb-xfixes0-dev \
+          libxkbcommon-dev \
+          libssl-dev
+    
+    - name: Install Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+    
+    - name: Build release
+      run: cargo build --release --verbose
+    
+    - name: Run tests
+      run: cargo test --release --verbose
+    
+    - name: Create artifact directory
+      run: mkdir -p artifacts
+    
+    - name: Copy binary
+      run: cp target/release/craterboy artifacts/craterboy-linux-x86_64
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: craterboy-linux-x86_64
+        path: artifacts/craterboy-linux-x86_64
+
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+    
+    - name: Build release
+      run: cargo build --release --verbose
+    
+    - name: Run tests
+      run: cargo test --release --verbose
+    
+    - name: Create artifact directory
+      run: mkdir -p artifacts
+    
+    - name: Copy binary
+      run: cp target/release/craterboy artifacts/craterboy-macos-x86_64
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: craterboy-macos-x86_64
+        path: artifacts/craterboy-macos-x86_64
+
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+    
+    - name: Build release
+      run: cargo build --release --verbose
+    
+    - name: Run tests
+      run: cargo test --release --verbose
+    
+    - name: Create artifact directory
+      run: mkdir -p artifacts
+    
+    - name: Copy binary
+      run: cp target/release/craterboy.exe artifacts/craterboy-windows-x86_64.exe
+      shell: bash
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: craterboy-windows-x86_64
+        path: artifacts/craterboy-windows-x86_64.exe
