@@ -11,9 +11,12 @@ const OPEN_BUS: u8 = 0xFF;
 const CYCLES_PER_LINE: u16 = 456;
 const VBLANK_START: u8 = 144;
 const TOTAL_LINES: u8 = 154;
-const DMA_CYCLES: u32 = 160;
+// OAM DMA copies 160 bytes, 4 cycles each (DMG/CGB)
+pub const DMA_CYCLES_PER_BYTE: u32 = 4;
+pub const DMA_TOTAL_CYCLES: u32 = DMA_CYCLES_PER_BYTE * OAM_SIZE as u32;
 
 const REG_JOYP: u16 = 0xFF00;
+
 const REG_LCDC: u16 = 0xFF40;
 const REG_DIV: u16 = 0xFF04;
 const REG_TIMA: u16 = 0xFF05;
@@ -104,6 +107,7 @@ pub struct Bus {
     dma: u8,
     dma_active: bool,
     dma_cycles_remaining: u32,
+    dma_bytes_transferred: u32,
     dma_base: u16,
     double_speed: bool,
     speed_switch_pending: bool,
@@ -217,7 +221,9 @@ impl Bus {
             dma,
             dma_active: false,
             dma_cycles_remaining: 0,
+            dma_bytes_transferred: 0,
             dma_base: 0,
+
             double_speed: false,
             speed_switch_pending: false,
             cgb_mode: is_cgb,
@@ -562,7 +568,8 @@ impl Bus {
             REG_DMA => {
                 self.dma = value;
                 self.dma_active = true;
-                self.dma_cycles_remaining = DMA_CYCLES;
+                self.dma_cycles_remaining = DMA_TOTAL_CYCLES;
+                self.dma_bytes_transferred = 0;
                 self.dma_base = (value as u16) << 8;
             }
             REG_KEY0 => {}
@@ -680,18 +687,26 @@ impl Bus {
         if !self.dma_active {
             return;
         }
-        if cycles >= self.dma_cycles_remaining {
-            self.dma_cycles_remaining = 0;
-        } else {
-            self.dma_cycles_remaining -= cycles;
+
+        let previous_remaining = self.dma_cycles_remaining;
+        let consumed = cycles.min(previous_remaining);
+        self.dma_cycles_remaining = previous_remaining - consumed;
+
+        let elapsed_before = DMA_TOTAL_CYCLES - previous_remaining;
+        let elapsed_after = DMA_TOTAL_CYCLES - self.dma_cycles_remaining;
+        let bytes_before = elapsed_before / DMA_CYCLES_PER_BYTE;
+        let bytes_after = elapsed_after / DMA_CYCLES_PER_BYTE;
+
+        for i in bytes_before..bytes_after.min(OAM_SIZE as u32) {
+            let src_addr = self.dma_base.wrapping_add(i as u16);
+            let byte = self.read8(src_addr);
+            self.oam[i as usize] = byte;
         }
-        if self.dma_cycles_remaining == 0 {
-            let base = self.dma_base;
-            for i in 0..OAM_SIZE {
-                let byte = self.read8(base.wrapping_add(i as u16));
-                self.oam[i] = byte;
-            }
+        self.dma_bytes_transferred = bytes_after.min(OAM_SIZE as u32);
+
+        if self.dma_cycles_remaining == 0 || self.dma_bytes_transferred >= OAM_SIZE as u32 {
             self.dma_active = false;
+            self.dma_cycles_remaining = 0;
         }
     }
 
@@ -909,7 +924,8 @@ impl Bus {
 #[cfg(test)]
 mod tests {
     use super::{
-        BOOT_ROM_SIZE, Bus, DMA_CYCLES, IF_TIMER, REG_BGP, REG_BGPD, REG_BGPI, REG_DIV, REG_DMA,
+        BOOT_ROM_SIZE, Bus, DMA_TOTAL_CYCLES, IF_TIMER, REG_BGP, REG_BGPD, REG_BGPI, REG_DIV,
+        REG_DMA,
         REG_HDMA1, REG_HDMA2, REG_HDMA3, REG_HDMA4, REG_HDMA5, REG_IF, REG_JOYP, REG_KEY0,
         REG_KEY1, REG_LCDC, REG_LY, REG_LYC, REG_OBP0, REG_OBP1, REG_OBPD, REG_OBPI, REG_SCX,
         REG_SCY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA, REG_VBK, REG_WX, REG_WY,
@@ -1087,7 +1103,7 @@ mod tests {
         }
         bus.write8(0xFF46, 0xC0);
         assert_eq!(bus.read8(0xFE00), 0x00);
-        bus.step(DMA_CYCLES);
+        bus.step(DMA_TOTAL_CYCLES);
 
         assert_eq!(bus.read8(0xFE00), 0x01);
         assert_eq!(bus.read8(0xFE9F), 0xA0);
@@ -1912,7 +1928,7 @@ mod proptests {
 
             // Start DMA from 0xC000
             bus.write8(REG_DMA, 0xC0);
-            bus.step(DMA_CYCLES);
+            bus.step(DMA_TOTAL_CYCLES);
 
             // Check OAM
             let oam_addr = 0xFE00 + source_offset as u16;
