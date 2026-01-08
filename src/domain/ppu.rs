@@ -48,9 +48,19 @@ struct SpriteData {
     oam_index: usize,
 }
 
+/// Pixel Processing Unit for Game Boy graphics rendering.
+///
+/// The PPU maintains its own line counter (`current_line`) for rendering,
+/// separate from the Bus's LY register. Both increment every 456 cycles
+/// (SCANLINE_CYCLES) and stay synchronized as long as they receive the same
+/// cycle count. The Bus handles STAT interrupts and LY register reads, while
+/// the PPU focuses on scanline rendering.
+///
+/// Note: This dual counter approach works because both increment identically,
+/// but a future refactor could have PPU read bus.ly instead of tracking
+/// current_line separately.
 #[derive(Debug)]
 pub struct Ppu {
-    cycle_counter: u32,
     line_cycle_counter: u32,
     current_line: u8,
     bg_priority: Vec<u8>,
@@ -68,7 +78,6 @@ impl Default for Ppu {
 impl Ppu {
     pub fn new() -> Self {
         Self {
-            cycle_counter: 0,
             line_cycle_counter: 0,
             current_line: 0,
             bg_priority: vec![0; FRAME_WIDTH * FRAME_HEIGHT],
@@ -107,7 +116,6 @@ impl Ppu {
             // Check if we completed a frame
             if self.current_line >= TOTAL_LINES {
                 self.current_line = 0;
-                self.cycle_counter = 0;
                 return true;
             }
         }
@@ -205,6 +213,10 @@ impl Ppu {
         let win_tile_map_base = if lcdc & 0x40 != 0 { 0x1C00 } else { 0x1800 };
         let use_unsigned = lcdc & 0x10 != 0;
         let window_enabled = lcdc & 0x20 != 0;
+        // Note: Game Boy hardware tracks an internal window line counter that only
+        // increments when the window is visible on a scanline. This implementation
+        // uses a simpler approach that recalculates window position each frame.
+        // This can cause minor inaccuracies if WY is changed mid-frame (rare edge case).
         let window_active = window_enabled && line >= wy && wx <= 166;
 
         let y = line as usize;
@@ -311,8 +323,10 @@ impl Ppu {
         let width = FRAME_WIDTH;
         let line_i16 = line as i16;
 
-        // Render sprites in reverse order (higher priority last)
-        for sprite in self.line_sprites.iter().rev() {
+        // Render sprites in priority order (lower X and lower OAM index = higher priority)
+        // Sort already orders by ascending X and OAM index, so lower priority sprites
+        // are rendered first and higher priority sprites overwrite them
+        for sprite in self.line_sprites.iter() {
             let y_flip = sprite.attr & 0x40 != 0;
             let x_flip = sprite.attr & 0x20 != 0;
             let dmg_palette = if sprite.attr & 0x10 != 0 { obp1 } else { obp0 };
@@ -658,7 +672,8 @@ mod tests {
         bus.write8(0xFE07, 0x00);
 
         ppu.render_frame(&bus, &mut framebuffer);
-        assert_eq!(framebuffer.as_slice()[0], 0x88);
+        // Sprite 0 (OAM index 0) has higher priority and should be visible
+        assert_eq!(framebuffer.as_slice()[0], 0x08);
     }
 }
 
