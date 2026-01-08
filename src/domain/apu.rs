@@ -507,16 +507,39 @@ impl WaveChannel {
 
     pub fn read_wave_ram(&self, addr: u16) -> u8 {
         let index = (addr - WAVE_RAM_START) as usize;
-        if index < WAVE_RAM_SIZE {
-            self.wave_ram[index]
+        if index >= WAVE_RAM_SIZE {
+            return 0xFF;
+        }
+
+        // When wave channel is enabled, only the currently-accessed byte can be read
+        // All other reads return 0xFF
+        if self.enabled {
+            let current_byte = (self.position as usize / 2) % WAVE_RAM_SIZE;
+            if index == current_byte {
+                self.wave_ram[index]
+            } else {
+                0xFF
+            }
         } else {
-            0xFF
+            self.wave_ram[index]
         }
     }
 
     pub fn write_wave_ram(&mut self, addr: u16, value: u8) {
         let index = (addr - WAVE_RAM_START) as usize;
-        if index < WAVE_RAM_SIZE {
+        if index >= WAVE_RAM_SIZE {
+            return;
+        }
+
+        // When wave channel is enabled, only the currently-accessed byte can be written
+        // All other writes are ignored
+        if self.enabled {
+            let current_byte = (self.position as usize / 2) % WAVE_RAM_SIZE;
+            if index == current_byte {
+                self.wave_ram[index] = value;
+            }
+            // else: write is ignored
+        } else {
             self.wave_ram[index] = value;
         }
     }
@@ -1145,7 +1168,7 @@ impl Apu {
 mod tests {
     use super::{
         Apu, CPU_HZ, DEFAULT_OUTPUT_SAMPLE_RATE_HZ, FRAME_CYCLES, NoiseChannel, PulseChannel,
-        WaveChannel,
+        WAVE_RAM_SIZE, WAVE_RAM_START, WaveChannel,
     };
 
     #[test]
@@ -1383,6 +1406,155 @@ mod tests {
         assert_eq!(channel.read_wave_ram(0xFF30), 0xAB);
         channel.write_wave_ram(0xFF3F, 0xCD);
         assert_eq!(channel.read_wave_ram(0xFF3F), 0xCD);
+    }
+
+    #[test]
+    fn wave_ram_accessible_when_channel_disabled() {
+        let mut channel = WaveChannel::new();
+        assert!(!channel.enabled, "Channel should start disabled");
+
+        // Write to all wave RAM locations
+        for i in 0..WAVE_RAM_SIZE {
+            let addr = WAVE_RAM_START + i as u16;
+            channel.write_wave_ram(addr, i as u8);
+        }
+
+        // Read back and verify all locations
+        for i in 0..WAVE_RAM_SIZE {
+            let addr = WAVE_RAM_START + i as u16;
+            assert_eq!(
+                channel.read_wave_ram(addr),
+                i as u8,
+                "Wave RAM at offset {} should be accessible when disabled",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn wave_ram_restricted_when_channel_enabled() {
+        let mut channel = WaveChannel::new();
+
+        // Initialize wave RAM with known values
+        for i in 0..WAVE_RAM_SIZE {
+            let addr = WAVE_RAM_START + i as u16;
+            channel.write_wave_ram(addr, i as u8);
+        }
+
+        // Enable the channel
+        channel.write_io(0xFF1A, 0x80); // Enable via NR30
+        channel.write_io(0xFF1E, 0x80); // Trigger
+        assert!(channel.enabled, "Channel should be enabled");
+
+        // Position starts at 0, so byte 0 (position/2 = 0) should be accessible
+        let current_byte = (channel.position / 2) as usize;
+
+        // Try to read all wave RAM locations
+        for i in 0..WAVE_RAM_SIZE {
+            let addr = WAVE_RAM_START + i as u16;
+            let value = channel.read_wave_ram(addr);
+
+            if i == current_byte {
+                assert_eq!(
+                    value, i as u8,
+                    "Currently-accessed byte {} should be readable",
+                    i
+                );
+            } else {
+                assert_eq!(
+                    value, 0xFF,
+                    "Non-current byte {} should return 0xFF when channel is enabled",
+                    i
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wave_ram_write_restricted_when_channel_enabled() {
+        let mut channel = WaveChannel::new();
+
+        // Initialize wave RAM with known values
+        for i in 0..WAVE_RAM_SIZE {
+            let addr = WAVE_RAM_START + i as u16;
+            channel.write_wave_ram(addr, i as u8);
+        }
+
+        // Enable the channel
+        channel.write_io(0xFF1A, 0x80);
+        channel.write_io(0xFF1E, 0x80);
+        assert!(channel.enabled);
+
+        let current_byte = (channel.position / 2) as usize;
+
+        // Try to write to all wave RAM locations
+        for i in 0..WAVE_RAM_SIZE {
+            let addr = WAVE_RAM_START + i as u16;
+            channel.write_wave_ram(addr, 0xFF);
+        }
+
+        // Disable channel to check what was actually written
+        channel.enabled = false;
+
+        // Verify only the current byte was modified
+        for i in 0..WAVE_RAM_SIZE {
+            let addr = WAVE_RAM_START + i as u16;
+            let value = channel.read_wave_ram(addr);
+
+            if i == current_byte {
+                assert_eq!(
+                    value, 0xFF,
+                    "Currently-accessed byte {} should have been written",
+                    i
+                );
+            } else {
+                assert_eq!(
+                    value, i as u8,
+                    "Non-current byte {} should not have been modified",
+                    i
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wave_ram_access_follows_playback_position() {
+        let mut channel = WaveChannel::new();
+
+        // Initialize wave RAM
+        for i in 0..WAVE_RAM_SIZE {
+            let addr = WAVE_RAM_START + i as u16;
+            channel.write_wave_ram(addr, i as u8);
+        }
+
+        // Enable the channel with a frequency
+        channel.write_io(0xFF1A, 0x80);
+        channel.frequency = 1024;
+        channel.volume_code = 1;
+        channel.write_io(0xFF1E, 0x80); // Trigger
+
+        // Step through several positions
+        for _ in 0..10 {
+            channel.step(1000);
+
+            let current_byte = (channel.position / 2) as usize % WAVE_RAM_SIZE;
+            let addr = WAVE_RAM_START + current_byte as u16;
+
+            // The current byte should be readable
+            let value = channel.read_wave_ram(addr);
+            assert_eq!(
+                value, current_byte as u8,
+                "Byte at playback position should be readable"
+            );
+
+            // Other bytes should return 0xFF
+            let other_addr = WAVE_RAM_START + ((current_byte + 1) % WAVE_RAM_SIZE) as u16;
+            assert_eq!(
+                channel.read_wave_ram(other_addr),
+                0xFF,
+                "Non-current byte should return 0xFF"
+            );
+        }
     }
 
     #[test]
