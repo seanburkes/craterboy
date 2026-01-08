@@ -18,6 +18,8 @@ pub const DMA_CYCLES_PER_BYTE: u32 = 4;
 pub const DMA_TOTAL_CYCLES: u32 = DMA_CYCLES_PER_BYTE * OAM_SIZE as u32;
 
 const REG_JOYP: u16 = 0xFF00;
+const REG_SB: u16 = 0xFF01;
+const REG_SC: u16 = 0xFF02;
 
 const REG_LCDC: u16 = 0xFF40;
 const REG_DIV: u16 = 0xFF04;
@@ -70,8 +72,15 @@ const REG_SVBK: u16 = 0xFF70;
 const IF_VBLANK: u8 = 0x01;
 const IF_STAT: u8 = 0x02;
 const IF_TIMER: u8 = 0x04;
+const IF_SERIAL: u8 = 0x08;
+const IF_JOYPAD: u8 = 0x10;
 
 const HDMA_BLOCK_SIZE: usize = 0x10;
+
+// Serial transfer takes 8192 cycles (512 cycles per bit, 8 bits)
+// Internal clock: 8192 cycles (8KHz)
+// External clock: transfers are controlled externally
+const SERIAL_TRANSFER_CYCLES: u32 = 8192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HdmaMode {
@@ -145,6 +154,9 @@ pub struct Bus {
     hdma_blocks_remaining: u8,
     hdma_active: bool,
     hdma_mode: HdmaMode,
+    sb: u8,
+    sc: u8,
+    serial_cycles_remaining: u32,
 }
 
 impl Bus {
@@ -271,6 +283,9 @@ impl Bus {
             hdma_blocks_remaining: 0,
             hdma_active: false,
             hdma_mode: HdmaMode::Inactive,
+            sb: 0x00,
+            sc: 0x00,
+            serial_cycles_remaining: 0,
         })
     }
 
@@ -457,6 +472,7 @@ impl Bus {
 
         self.step_div(subsystem_cycles);
         self.step_timer(subsystem_cycles);
+        self.step_serial(subsystem_cycles);
         let _ = self.apu.step(subsystem_cycles);
         self.step_ppu(subsystem_cycles);
         self.step_hdma();
@@ -550,6 +566,9 @@ impl Bus {
         self.ppu_line_cycles = 0;
         self.ppu_mode = 0;
         self.stat = 0x80;
+        self.sb = 0x00;
+        self.sc = 0x00;
+        self.serial_cycles_remaining = 0;
 
         self.set_io_reg(REG_NR10, 0x80);
         self.set_io_reg(REG_NR11, 0xBF);
@@ -636,6 +655,8 @@ impl Bus {
     fn read_io(&self, addr: u16) -> u8 {
         match addr {
             REG_JOYP => self.read_joyp(),
+            REG_SB => self.sb,
+            REG_SC => self.sc | 0x7E, // Bits 1-6 are unused and read as 1
             REG_DIV => self.div,
             REG_TIMA => self.tima,
             REG_TMA => self.tma,
@@ -681,6 +702,26 @@ impl Bus {
     fn write_io(&mut self, addr: u16, value: u8) {
         match addr {
             REG_JOYP => self.joyp_select = value & 0x30,
+            REG_SB => self.sb = value,
+            REG_SC => {
+                let old_sc = self.sc;
+                self.sc = value;
+
+                // Check if transfer start bit (bit 7) is set and clock is internal (bit 0 = 1)
+                // Transfer starts when SC is written with bit 7 = 1
+                let start_transfer = (value & 0x80) != 0;
+                let internal_clock = (value & 0x01) != 0;
+                let was_transferring = (old_sc & 0x80) != 0;
+
+                if start_transfer && internal_clock && !was_transferring {
+                    // Start a new serial transfer with internal clock
+                    self.serial_cycles_remaining = SERIAL_TRANSFER_CYCLES;
+                }
+
+                // External clock mode (bit 0 = 0) is not fully implemented
+                // In external clock mode, the transfer is controlled by an external device
+                // For now, we just hold the state but don't perform actual transfers
+            }
             REG_DIV => {
                 // Writing to DIV resets the entire system counter
                 // This can trigger a falling edge if the currently selected bit was set
@@ -946,6 +987,38 @@ impl Bus {
         // This function is kept for API compatibility but does nothing
     }
 
+    fn step_serial(&mut self, cycles: u32) {
+        // Only process if a transfer is in progress (SC bit 7 is set and internal clock)
+        let is_transferring = (self.sc & 0x80) != 0;
+        let internal_clock = (self.sc & 0x01) != 0;
+
+        if !is_transferring || !internal_clock {
+            return;
+        }
+
+        if self.serial_cycles_remaining == 0 {
+            return;
+        }
+
+        // Decrement remaining cycles
+        if self.serial_cycles_remaining <= cycles {
+            // Transfer complete
+            self.serial_cycles_remaining = 0;
+
+            // Shift out SB data (send 0xFF if no device connected)
+            // When no device is connected, received bits are all 1
+            self.sb = 0xFF;
+
+            // Clear transfer start bit (bit 7) in SC
+            self.sc &= 0x7F;
+
+            // Request serial interrupt
+            self.interrupt_flag |= IF_SERIAL;
+        } else {
+            self.serial_cycles_remaining -= cycles;
+        }
+    }
+
     fn step_dma(&mut self, cycles: u32) {
         if !self.dma_active {
             return;
@@ -1187,10 +1260,11 @@ impl Bus {
 #[cfg(test)]
 mod tests {
     use super::{
-        Bus, DMA_TOTAL_CYCLES, DMG_BOOT_ROM_SIZE, IF_TIMER, REG_BGP, REG_BGPD, REG_BGPI, REG_DIV,
-        REG_DMA, REG_HDMA1, REG_HDMA2, REG_HDMA3, REG_HDMA4, REG_HDMA5, REG_IF, REG_JOYP, REG_KEY0,
-        REG_KEY1, REG_LCDC, REG_LY, REG_LYC, REG_OBP0, REG_OBP1, REG_OBPD, REG_OBPI, REG_SCX,
-        REG_SCY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA, REG_VBK, REG_WX, REG_WY,
+        Bus, DMA_TOTAL_CYCLES, DMG_BOOT_ROM_SIZE, IF_SERIAL, IF_TIMER, REG_BGP, REG_BGPD, REG_BGPI,
+        REG_DIV, REG_DMA, REG_HDMA1, REG_HDMA2, REG_HDMA3, REG_HDMA4, REG_HDMA5, REG_IF, REG_JOYP,
+        REG_KEY0, REG_KEY1, REG_LCDC, REG_LY, REG_LYC, REG_OBP0, REG_OBP1, REG_OBPD, REG_OBPI,
+        REG_SB, REG_SC, REG_SCX, REG_SCY, REG_STAT, REG_TAC, REG_TIMA, REG_TMA, REG_VBK, REG_WX,
+        REG_WY, SERIAL_TRANSFER_CYCLES,
     };
     use crate::domain::Cartridge;
     use crate::domain::cartridge::ROM_BANK_SIZE;
@@ -3108,5 +3182,187 @@ mod proptests {
             // Bank 0 should still be readable
             prop_assert_eq!(bus.read8(addr), value, "Bank 0 should be accessible regardless of SVBK");
         }
+    }
+
+    #[test]
+    fn serial_registers_read_write() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Test SB register
+        bus.write8(REG_SB, 0x42);
+        assert_eq!(bus.read8(REG_SB), 0x42, "SB should read back written value");
+
+        // Test SC register (bits 1-6 should read as 1)
+        bus.write8(REG_SC, 0x00);
+        assert_eq!(bus.read8(REG_SC), 0x7E, "SC unused bits should read as 1");
+
+        bus.write8(REG_SC, 0x81); // Internal clock, transfer start
+        assert_eq!(
+            bus.read8(REG_SC) & 0x81,
+            0x81,
+            "SC bit 7 and 0 should be set"
+        );
+    }
+
+    #[test]
+    fn serial_transfer_internal_clock() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Write data to SB
+        bus.write8(REG_SB, 0xAB);
+        assert_eq!(bus.read8(REG_SB), 0xAB);
+
+        // Start serial transfer with internal clock (bit 7 = 1, bit 0 = 1)
+        bus.write8(REG_SC, 0x81);
+
+        // SC bit 7 should be set (transfer in progress)
+        assert_eq!(
+            bus.read8(REG_SC) & 0x80,
+            0x80,
+            "Transfer should be in progress"
+        );
+
+        // Check that serial interrupt is not set yet
+        assert_eq!(
+            bus.read8(REG_IF) & IF_SERIAL,
+            0,
+            "Serial interrupt should not be set yet"
+        );
+
+        // Step through most of the transfer (not complete yet)
+        bus.step(SERIAL_TRANSFER_CYCLES - 1);
+
+        // Transfer should still be in progress
+        assert_eq!(
+            bus.read8(REG_SC) & 0x80,
+            0x80,
+            "Transfer should still be in progress"
+        );
+        assert_eq!(
+            bus.read8(REG_IF) & IF_SERIAL,
+            0,
+            "Serial interrupt should not be set yet"
+        );
+
+        // Complete the transfer
+        bus.step(1);
+
+        // SC bit 7 should be cleared (transfer complete)
+        assert_eq!(bus.read8(REG_SC) & 0x80, 0, "Transfer should be complete");
+
+        // Serial interrupt should be set
+        assert_eq!(
+            bus.read8(REG_IF) & IF_SERIAL,
+            IF_SERIAL,
+            "Serial interrupt should be set"
+        );
+
+        // SB should be 0xFF (no device connected)
+        assert_eq!(
+            bus.read8(REG_SB),
+            0xFF,
+            "SB should be 0xFF when no device connected"
+        );
+    }
+
+    #[test]
+    fn serial_transfer_completes_immediately_if_enough_cycles() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(REG_SB, 0x55);
+        bus.write8(REG_SC, 0x81); // Start transfer
+
+        // Step with enough cycles to complete transfer
+        bus.step(SERIAL_TRANSFER_CYCLES);
+
+        // Transfer should be complete
+        assert_eq!(bus.read8(REG_SC) & 0x80, 0, "Transfer should be complete");
+        assert_eq!(
+            bus.read8(REG_IF) & IF_SERIAL,
+            IF_SERIAL,
+            "Serial interrupt should be set"
+        );
+    }
+
+    #[test]
+    fn serial_external_clock_mode_does_not_auto_transfer() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(REG_SB, 0x12);
+        // Start transfer with external clock (bit 0 = 0)
+        bus.write8(REG_SC, 0x80);
+
+        // Step many cycles
+        bus.step(SERIAL_TRANSFER_CYCLES * 2);
+
+        // Transfer should not auto-complete with external clock
+        // (external clock is not fully implemented, so bit 7 stays set)
+        assert_eq!(
+            bus.read8(REG_SC) & 0x80,
+            0x80,
+            "External clock transfer should not auto-complete"
+        );
+        assert_eq!(
+            bus.read8(REG_IF) & IF_SERIAL,
+            0,
+            "Serial interrupt should not be set"
+        );
+    }
+
+    #[test]
+    fn serial_no_transfer_without_start_bit() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.write8(REG_SB, 0x99);
+        // Write SC without start bit (bit 7 = 0)
+        bus.write8(REG_SC, 0x01);
+
+        // Step many cycles
+        bus.step(SERIAL_TRANSFER_CYCLES * 2);
+
+        // No transfer should occur
+        assert_eq!(
+            bus.read8(REG_SC) & 0x80,
+            0,
+            "Transfer bit should not be set"
+        );
+        assert_eq!(
+            bus.read8(REG_IF) & IF_SERIAL,
+            0,
+            "Serial interrupt should not be set"
+        );
+        assert_eq!(bus.read8(REG_SB), 0x99, "SB should not change");
+    }
+
+    #[test]
+    fn serial_post_boot_state() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut bus = Bus::new(cartridge).expect("bus");
+
+        bus.apply_post_boot_state();
+
+        assert_eq!(bus.read8(REG_SB), 0x00, "SB should be 0x00 after boot");
+        assert_eq!(
+            bus.read8(REG_SC) & 0x81,
+            0x00,
+            "SC should be 0x00 after boot (ignoring unused bits)"
+        );
     }
 }
