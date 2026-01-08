@@ -213,12 +213,16 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
                     }
                     state.handle_key(code, pressed, event.repeat);
 
-                    // Rate-limit redraws to reduce rendering overhead during input spam
-                    let now = Instant::now();
-                    let time_until_next = next_frame.saturating_duration_since(now);
-                    if time_until_next > Duration::from_millis(4) {
-                        window.request_redraw();
+                    // Only request immediate redraw if we haven't emulated yet this frame
+                    // This provides low input latency while avoiding stale frame renders
+                    if !frame_emulated {
+                        let now = Instant::now();
+                        let time_until_next = next_frame.saturating_duration_since(now);
+                        if time_until_next > Duration::from_millis(4) {
+                            window.request_redraw();
+                        }
                     }
+                    // If already emulated, wait for next scheduled frame to avoid flickering
                 }
             }
             WindowEvent::CursorMoved { .. } => {}
