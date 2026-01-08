@@ -1,0 +1,12 @@
+pub mod huc1;
+pub mod huc3;
+pub mod mbc1;
+pub mod mbc2;
+pub mod mbc3;
+pub mod mbc5;
+pub mod mbc6;
+pub mod mbc7;
+pub mod mmm01;
+pub mod pocket_camera;
+pub mod rom_only;
+pub mod tama5;
