@@ -93,21 +93,25 @@ impl Ppu {
 
     pub fn step(&mut self, cycles: u32, bus: &Bus, framebuffer: &mut Framebuffer) -> bool {
         let lcdc = bus.read8(REG_LCDC);
-        if lcdc & 0x80 == 0 {
-            // LCD disabled
-            self.clear_frame(framebuffer, self.palette[0]);
-            return false;
-        }
 
         self.line_cycle_counter = self.line_cycle_counter.saturating_add(cycles);
 
-        // Process scanline rendering
+        // Process scanline timing even when LCD is disabled
+        // This ensures step_frame() doesn't hang waiting for LCD to be enabled
         while self.line_cycle_counter >= SCANLINE_CYCLES {
             self.line_cycle_counter -= SCANLINE_CYCLES;
 
-            // Render current scanline if we're in visible area
-            if self.current_line < VBLANK_LINE {
-                self.render_scanline(bus, framebuffer, self.current_line);
+            // Only render if LCD is enabled
+            if lcdc & 0x80 != 0 {
+                // Render current scanline if we're in visible area
+                if self.current_line < VBLANK_LINE {
+                    self.render_scanline(bus, framebuffer, self.current_line);
+                }
+            } else {
+                // LCD disabled - clear the framebuffer to background color once per frame
+                if self.current_line == 0 {
+                    self.clear_frame(framebuffer, self.palette[0]);
+                }
             }
 
             // Move to next line

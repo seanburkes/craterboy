@@ -6,7 +6,6 @@
 ///
 /// Serial transfer takes 8192 cycles (512 cycles per bit, 8 bits) on internal clock.
 /// External clock mode is not fully implemented.
-
 // Serial transfer takes 8192 cycles (512 cycles per bit, 8 bits)
 // Internal clock: 8192 cycles (8KHz)
 // External clock: transfers are controlled externally

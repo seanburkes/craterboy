@@ -9,7 +9,6 @@
 /// The timer uses a falling-edge detection scheme where TIMA increments
 /// when the selected bit of the system counter transitions from 1 to 0.
 /// Overflow handling is delayed by one M-cycle for accuracy.
-
 const IF_TIMER: u8 = 0x04;
 
 /// Timer overflow occurs in 3 stages:

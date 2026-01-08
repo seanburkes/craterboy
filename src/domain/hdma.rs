@@ -4,7 +4,6 @@
 /// HDMA has two modes:
 /// - General Purpose DMA (GDMA): Transfers all blocks immediately
 /// - H-Blank DMA: Transfers one block per H-Blank period
-
 const HDMA_BLOCK_SIZE: usize = 0x10; // 16 bytes per block
 const VBLANK_START: u8 = 144;
 

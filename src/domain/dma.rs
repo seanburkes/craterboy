@@ -2,7 +2,6 @@
 ///
 /// Implements OAM DMA transfer which copies 160 bytes from ROM/RAM to OAM.
 /// DMA transfers take 160 microseconds (640 cycles on DMG, 4 cycles per byte).
-
 const OAM_SIZE: usize = 0xA0; // 160 bytes
 pub const DMA_CYCLES_PER_BYTE: u32 = 4;
 pub const DMA_TOTAL_CYCLES: u32 = DMA_CYCLES_PER_BYTE * OAM_SIZE as u32;
