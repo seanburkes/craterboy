@@ -190,6 +190,7 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
     let mut fps_last = Instant::now();
     let mut fps_frames: u32 = 0;
     let mut frame_time_last = Instant::now();
+    let mut frame_emulated = false; // Track if we've emulated for current frame period
     state.set_overlay_metric("FPS", "0.0");
     state.set_overlay_metric("Frame", "0.0 ms");
     state.set_overlay_metric("Target", format!("{:.3} ms", target_ms));
@@ -212,14 +213,12 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
                     }
                     state.handle_key(code, pressed, event.repeat);
 
-                    // Only request redraw if we're more than 4ms away from next scheduled frame
-                    // This prevents input spam from creating extra emulation frames
+                    // Rate-limit redraws to reduce rendering overhead during input spam
                     let now = Instant::now();
                     let time_until_next = next_frame.saturating_duration_since(now);
                     if time_until_next > Duration::from_millis(4) {
                         window.request_redraw();
                     }
-                    // Otherwise, let the scheduled frame handle it (max 4ms latency)
                 }
             }
             WindowEvent::CursorMoved { .. } => {}
@@ -233,7 +232,13 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
                     elwt.exit();
                     return;
                 }
-                state.update_frame();
+
+                // Only emulate once per frame period to prevent audio speed-up
+                if !frame_emulated {
+                    state.update_frame();
+                    frame_emulated = true;
+                }
+
                 match state.render() {
                     Ok(()) => {}
                     Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
@@ -267,6 +272,7 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
                 while next_frame <= now {
                     next_frame += frame_interval;
                 }
+                frame_emulated = false; // Reset flag for new frame period
                 window.request_redraw();
             }
             elwt.set_control_flow(ControlFlow::WaitUntil(next_frame));
