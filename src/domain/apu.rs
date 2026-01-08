@@ -818,6 +818,7 @@ impl Apu {
         }
     }
 
+    #[allow(clippy::result_unit_err)]
     pub fn step(&mut self, cycles: u32) -> Result<(), ()> {
         self.frame_sequencer_cycles = self.frame_sequencer_cycles.wrapping_add(cycles);
         while self.frame_sequencer_cycles >= FRAME_SEQUENCER_CYCLES {

@@ -28,7 +28,7 @@ enum Mbc7EepromState {
     Idle,
     ReadCommand,
     ReadData,
-    WriteCommand,
+    _WriteCommand,
     WriteData,
     Busy,
 }
@@ -198,22 +198,25 @@ impl Mbc7 {
         }
 
         // Clock falling edge - prepare next bit for ReadData
-        if !new_clk && self.eeprom_clk && new_cs {
-            if self.eeprom_state == Mbc7EepromState::ReadData && self.eeprom_bits < 16 {
-                // Advance to next bit only after the current bit has been read
-                // (i.e., after a complete clock cycle)
-                let addr = (self.eeprom_command & 0x7F) as usize;
-                let next_bit = self.eeprom_bits + 1;
-                if next_bit < 16 {
-                    let byte_offset = addr * 2 + (next_bit / 8) as usize;
-                    if byte_offset < MBC7_EEPROM_SIZE {
-                        let byte = self.eeprom[byte_offset];
-                        let bit_in_byte = 7 - (next_bit % 8);
-                        self.eeprom_do = (byte >> bit_in_byte) & 1 != 0;
-                    }
+        if !new_clk
+            && self.eeprom_clk
+            && new_cs
+            && self.eeprom_state == Mbc7EepromState::ReadData
+            && self.eeprom_bits < 16
+        {
+            // Advance to next bit only after the current bit has been read
+            // (i.e., after a complete clock cycle)
+            let addr = (self.eeprom_command & 0x7F) as usize;
+            let next_bit = self.eeprom_bits + 1;
+            if next_bit < 16 {
+                let byte_offset = addr * 2 + (next_bit / 8) as usize;
+                if byte_offset < MBC7_EEPROM_SIZE {
+                    let byte = self.eeprom[byte_offset];
+                    let bit_in_byte = 7 - (next_bit % 8);
+                    self.eeprom_do = (byte >> bit_in_byte) & 1 != 0;
                 }
-                self.eeprom_bits = next_bit;
             }
+            self.eeprom_bits = next_bit;
         }
 
         self.eeprom_cs = new_cs;

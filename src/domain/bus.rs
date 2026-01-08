@@ -74,7 +74,9 @@ const REG_OBPD: u16 = 0xFF6B;
 const REG_SVBK: u16 = 0xFF70;
 const IF_VBLANK: u8 = 0x01;
 const IF_STAT: u8 = 0x02;
+#[cfg(test)]
 const IF_TIMER: u8 = 0x04;
+#[allow(dead_code)]
 const IF_JOYPAD: u8 = 0x10;
 
 #[derive(Debug)]

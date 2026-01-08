@@ -18,6 +18,7 @@ pub struct Mbc {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 enum MbcKind {
     RomOnly,
     Mbc1(mbc1::Mbc1),

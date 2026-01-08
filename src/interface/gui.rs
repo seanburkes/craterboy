@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -307,9 +307,7 @@ fn load_rom_cartridge(path: Option<PathBuf>) -> (Option<Cartridge>, Option<PathB
 }
 
 fn load_boot_rom(path: Option<PathBuf>) -> Option<Vec<u8>> {
-    let Some(path) = path else {
-        return None;
-    };
+    let path = path?;
     match std::fs::read(&path) {
         Ok(bytes) => Some(bytes),
         Err(err) => {
@@ -319,7 +317,7 @@ fn load_boot_rom(path: Option<PathBuf>) -> Option<Vec<u8>> {
     }
 }
 
-fn report_rom_error(path: &PathBuf, err: RomLoadError) {
+fn report_rom_error(path: &Path, err: RomLoadError) {
     match err {
         RomLoadError::Io(io_err) => {
             eprintln!("Failed to read ROM '{}': {}", path.display(), io_err);
@@ -1113,6 +1111,7 @@ fn text_width(font: &FontArc, scale: PxScale, text: &str) -> f32 {
     width
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_text(
     rgba: &mut [u8],
     stride: usize,
@@ -1160,6 +1159,7 @@ fn draw_text(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_rect_blend(
     rgba: &mut [u8],
     stride: usize,

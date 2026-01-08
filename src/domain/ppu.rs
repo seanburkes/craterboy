@@ -5,13 +5,13 @@ const CYCLES_PER_SECOND: u32 = 4_194_304;
 pub const FRAME_RATE_HZ: u32 = CYCLES_PER_SECOND / FRAME_CYCLES;
 pub const FRAME_INTERVAL_NS: u64 = 1_000_000_000 / FRAME_RATE_HZ as u64;
 const SCANLINE_CYCLES: u32 = 456;
-const OAM_SEARCH_CYCLES: u32 = 80;
-const DRAWING_CYCLES: u32 = 172;
-const HBLANK_CYCLES: u32 = 204;
+const _OAM_SEARCH_CYCLES: u32 = 80;
+const _DRAWING_CYCLES: u32 = 172;
+const _HBLANK_CYCLES: u32 = 204;
 const VBLANK_LINE: u8 = 144;
 const TOTAL_LINES: u8 = 154;
 const REG_LCDC: u16 = 0xFF40;
-const REG_LY: u16 = 0xFF44;
+const _REG_LY: u16 = 0xFF44;
 const REG_SCY: u16 = 0xFF42;
 const REG_SCX: u16 = 0xFF43;
 const REG_BGP: u16 = 0xFF47;
@@ -19,7 +19,7 @@ const REG_OBP0: u16 = 0xFF48;
 const REG_OBP1: u16 = 0xFF49;
 const REG_WY: u16 = 0xFF4A;
 const REG_WX: u16 = 0xFF4B;
-const VRAM_SIZE: usize = 0x2000;
+const _VRAM_SIZE: usize = 0x2000;
 const TILE_BYTES: usize = 16;
 const MAX_SPRITES_PER_LINE: usize = 10;
 const DMG_PALETTE: [[u8; 3]; 4] = [
@@ -179,7 +179,7 @@ impl Ppu {
                 break;
             }
 
-            let offset = (i * 4) as usize;
+            let offset = i * 4;
             let y = oam[offset] as i16 - 16;
             let x = oam[offset + 1] as i16 - 8;
             let tile = oam[offset + 2];
