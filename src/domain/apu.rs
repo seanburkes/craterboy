@@ -265,6 +265,11 @@ impl PulseChannel {
         self.envelope_add = value & 0x08 != 0;
         self.envelope_period = value & 0x07;
         self.current_volume = self.volume;
+
+        // DAC is disabled when upper 5 bits of envelope register are all 0
+        if value & 0xF8 == 0 {
+            self.enabled = false;
+        }
     }
 
     fn write_frequency_low(&mut self, value: u8) {
@@ -705,6 +710,11 @@ impl NoiseChannel {
                 self.envelope_add = value & 0x08 != 0;
                 self.envelope_period = value & 0x07;
                 self.current_volume = self.volume;
+
+                // DAC is disabled when upper 5 bits of envelope register are all 0
+                if value & 0xF8 == 0 {
+                    self.enabled = false;
+                }
             }
             REG_NR43 => {
                 self.shift_clock_frequency = (value >> 4) & 0x0F;
@@ -1756,5 +1766,85 @@ mod tests {
         channel.write_io(0xFF13, 0x00);
         channel.write_io(0xFF14, 0xC0);
         assert_eq!(channel.length_counter, 64, "Should use 64 when length is 0");
+    }
+
+    #[test]
+    fn pulse_channel_dac_off_disables_channel() {
+        let mut channel = PulseChannel::new();
+        // Enable the channel first
+        channel.write_io(0xFF12, 0x80); // Volume = 8
+        channel.write_io(0xFF14, 0x80); // Trigger
+        assert!(channel.enabled, "Channel should be enabled after trigger");
+
+        // Write 0 to NR12 - this disables the DAC (upper 5 bits all 0)
+        channel.write_io(0xFF12, 0x00);
+        assert!(
+            !channel.enabled,
+            "Channel should be disabled when DAC is off (NR12 & 0xF8 == 0)"
+        );
+    }
+
+    #[test]
+    fn pulse_channel_dac_off_various_values() {
+        let mut channel = PulseChannel::new();
+
+        // Test that DAC stays on with volume > 0
+        channel.write_io(0xFF12, 0x10); // Volume = 1
+        channel.write_io(0xFF14, 0x80); // Trigger
+        assert!(channel.enabled, "Channel should be enabled with volume 1");
+
+        // Test that DAC stays on with envelope enabled
+        channel.write_io(0xFF12, 0x08); // Volume = 0, but envelope add = 1
+        assert!(
+            channel.enabled,
+            "Channel should stay enabled with envelope direction bit set"
+        );
+
+        // Test that DAC turns off with all upper 5 bits = 0
+        channel.write_io(0xFF12, 0x07); // Only lower 3 bits set (period)
+        assert!(
+            !channel.enabled,
+            "Channel should be disabled when only envelope period is set"
+        );
+    }
+
+    #[test]
+    fn noise_channel_dac_off_disables_channel() {
+        let mut channel = NoiseChannel::new();
+        // Enable the channel first
+        channel.write_io(0xFF21, 0x80); // Volume = 8
+        channel.write_io(0xFF23, 0x80); // Trigger
+        assert!(channel.enabled, "Channel should be enabled after trigger");
+
+        // Write 0 to NR42 - this disables the DAC (upper 5 bits all 0)
+        channel.write_io(0xFF21, 0x00);
+        assert!(
+            !channel.enabled,
+            "Channel should be disabled when DAC is off (NR42 & 0xF8 == 0)"
+        );
+    }
+
+    #[test]
+    fn noise_channel_dac_off_various_values() {
+        let mut channel = NoiseChannel::new();
+
+        // Test that DAC stays on with volume > 0
+        channel.write_io(0xFF21, 0x10); // Volume = 1
+        channel.write_io(0xFF23, 0x80); // Trigger
+        assert!(channel.enabled, "Channel should be enabled with volume 1");
+
+        // Test that DAC stays on with envelope enabled
+        channel.write_io(0xFF21, 0x08); // Volume = 0, but envelope add = 1
+        assert!(
+            channel.enabled,
+            "Channel should stay enabled with envelope direction bit set"
+        );
+
+        // Test that DAC turns off with all upper 5 bits = 0
+        channel.write_io(0xFF21, 0x07); // Only lower 3 bits set (period)
+        assert!(
+            !channel.enabled,
+            "Channel should be disabled when only envelope period is set"
+        );
     }
 }
