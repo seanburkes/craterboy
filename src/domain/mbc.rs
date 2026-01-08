@@ -38,6 +38,7 @@ enum MbcKind {
     HuC3(HuC3),
     Mbc6(Box<Mbc6>),
     Mbc7(Mbc7),
+    PocketCamera(PocketCamera),
 }
 
 impl Mbc {
@@ -74,6 +75,7 @@ impl Mbc {
             CartridgeType::HuC3 => MbcKind::HuC3(HuC3::new()),
             CartridgeType::Mbc6 => MbcKind::Mbc6(Box::new(Mbc6::new())),
             CartridgeType::Mbc7SensorRumbleRamBattery => MbcKind::Mbc7(Mbc7::new()),
+            CartridgeType::PocketCamera => MbcKind::PocketCamera(PocketCamera::new()),
             other => return Err(MbcError::UnsupportedCartridgeType(other)),
         };
         Ok(Self { kind })
@@ -91,6 +93,7 @@ impl Mbc {
             MbcKind::HuC3(huc3) => huc3.read8(cartridge, addr),
             MbcKind::Mbc6(mbc6) => mbc6.read8(cartridge, addr),
             MbcKind::Mbc7(mbc7) => mbc7.read8(cartridge, addr),
+            MbcKind::PocketCamera(cam) => cam.read8(cartridge, addr),
         }
     }
 
@@ -106,6 +109,7 @@ impl Mbc {
             MbcKind::HuC3(huc3) => huc3.write8(cartridge, addr, value),
             MbcKind::Mbc6(mbc6) => mbc6.write8(cartridge, addr, value),
             MbcKind::Mbc7(mbc7) => mbc7.write8(cartridge, addr, value),
+            MbcKind::PocketCamera(cam) => cam.write8(cartridge, addr, value),
         }
     }
 
@@ -1725,6 +1729,98 @@ fn normalize_switchable_bank(bank: usize, bank_count: usize) -> usize {
     }
 }
 
+// Pocket Camera (Game Boy Camera) - 0xFC
+// Essentially MBC3 with additional camera hardware registers at A000-BFFF
+#[derive(Debug, Clone)]
+struct PocketCamera {
+    rom_bank: u8,
+    ram_bank: u8,
+    ram_enabled: bool,
+    // Camera registers (A000-A03F when camera mode is selected)
+    // We implement a minimal stub - real camera hardware is complex
+    camera_registers: [u8; 0x40],
+}
+
+impl PocketCamera {
+    fn new() -> Self {
+        Self {
+            rom_bank: 1,
+            ram_bank: 0,
+            ram_enabled: false,
+            camera_registers: [0; 0x40],
+        }
+    }
+
+    fn read8(&self, cartridge: &Cartridge, addr: u16) -> u8 {
+        match addr {
+            0x0000..=0x7FFF => {
+                let bank_count = bank_count(&cartridge.bytes);
+                let bank = normalize_switchable_bank(self.rom_bank as usize, bank_count);
+                RomBankMapping::with_banks(&cartridge.bytes, 0, bank).read(addr)
+            }
+            EXT_RAM_START..=EXT_RAM_END => {
+                if !self.ram_enabled {
+                    return OPEN_BUS;
+                }
+
+                // Camera registers are at A000-A03F
+                // This is a simplified implementation - real hardware has complex image processing
+                if addr < 0xA040 {
+                    let offset = (addr - EXT_RAM_START) as usize;
+                    return self.camera_registers[offset];
+                }
+
+                // Regular RAM banks
+                read_ext_ram(cartridge, Some(self.ram_bank as usize), addr)
+            }
+            _ => OPEN_BUS,
+        }
+    }
+
+    fn write8(&mut self, cartridge: &mut Cartridge, addr: u16, value: u8) {
+        match addr {
+            0x0000..=0x1FFF => {
+                self.ram_enabled = (value & 0x0F) == 0x0A;
+            }
+            0x2000..=0x3FFF => {
+                let mut bank = value & 0x7F; // 7-bit bank selection (0-127)
+                if bank == 0 {
+                    bank = 1;
+                }
+                self.rom_bank = bank;
+            }
+            0x4000..=0x5FFF => {
+                self.ram_bank = value & 0x0F; // Camera can have more RAM banks
+            }
+            EXT_RAM_START..=EXT_RAM_END => {
+                if !self.ram_enabled {
+                    return;
+                }
+
+                // Camera registers
+                if addr < 0xA040 {
+                    let offset = (addr - EXT_RAM_START) as usize;
+                    self.camera_registers[offset] = value;
+
+                    // Special handling for camera trigger register (A000)
+                    // Writing 1 to bit 0 starts camera capture
+                    // After "capture", we set bit 0 to 0 to indicate completion
+                    // This is a simplified simulation - real hardware takes time
+                    if offset == 0 && (value & 0x01) != 0 {
+                        // Simulate instant capture completion
+                        self.camera_registers[0] &= !0x01;
+                    }
+                    return;
+                }
+
+                // Regular RAM write
+                write_ext_ram(cartridge, Some(self.ram_bank as usize), addr, value);
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CYCLES_PER_SECOND, Mbc, RtcMode, bank_count};
@@ -2013,6 +2109,95 @@ mod tests {
     fn bank_count_rounds_up() {
         let bytes = vec![0; ROM_BANK_SIZE + 1];
         assert_eq!(bank_count(&bytes), 2);
+    }
+
+    // Pocket Camera Tests
+    #[test]
+    fn pocket_camera_rom_banking() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 4];
+        bytes[..ROM_BANK_SIZE].fill(0x11);
+        bytes[ROM_BANK_SIZE..ROM_BANK_SIZE * 2].fill(0x22);
+        bytes[ROM_BANK_SIZE * 2..ROM_BANK_SIZE * 3].fill(0x33);
+        bytes[ROM_BANK_SIZE * 3..].fill(0x44);
+        bytes[0x0147] = 0xFC; // Pocket Camera
+        bytes[0x0149] = 0x03; // 32KB RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Default bank 1
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 0x22);
+
+        // Switch to bank 2
+        mbc.write8(&mut cartridge, 0x2000, 0x02);
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 0x33);
+
+        // Bank 0 becomes bank 1
+        mbc.write8(&mut cartridge, 0x2000, 0x00);
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 0x22);
+    }
+
+    #[test]
+    fn pocket_camera_registers() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0xFC; // Pocket Camera
+        bytes[0x0149] = 0x02; // 8KB RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Enable RAM/camera
+        mbc.write8(&mut cartridge, 0x0000, 0x0A);
+
+        // Write to camera registers (A000-A03F)
+        mbc.write8(&mut cartridge, 0xA001, 0x12);
+        mbc.write8(&mut cartridge, 0xA002, 0x34);
+        mbc.write8(&mut cartridge, 0xA03F, 0xFF);
+
+        // Read back camera registers
+        assert_eq!(mbc.read8(&cartridge, 0xA001), 0x12);
+        assert_eq!(mbc.read8(&cartridge, 0xA002), 0x34);
+        assert_eq!(mbc.read8(&cartridge, 0xA03F), 0xFF);
+    }
+
+    #[test]
+    fn pocket_camera_capture_trigger() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0xFC; // Pocket Camera
+        bytes[0x0149] = 0x02; // 8KB RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Enable camera
+        mbc.write8(&mut cartridge, 0x0000, 0x0A);
+
+        // Trigger capture by setting bit 0 of A000
+        mbc.write8(&mut cartridge, 0xA000, 0x01);
+
+        // After capture, bit 0 should be cleared (simulated instant capture)
+        assert_eq!(mbc.read8(&cartridge, 0xA000) & 0x01, 0);
+    }
+
+    #[test]
+    fn pocket_camera_ram_beyond_registers() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0xFC; // Pocket Camera
+        bytes[0x0149] = 0x02; // 8KB RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Enable RAM
+        mbc.write8(&mut cartridge, 0x0000, 0x0A);
+
+        // Write to RAM beyond camera registers (A040-BFFF)
+        mbc.write8(&mut cartridge, 0xA040, 0xAA);
+        mbc.write8(&mut cartridge, 0xB000, 0xBB);
+
+        // Read back
+        assert_eq!(mbc.read8(&cartridge, 0xA040), 0xAA);
+        assert_eq!(mbc.read8(&cartridge, 0xB000), 0xBB);
     }
 
     #[test]

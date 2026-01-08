@@ -221,6 +221,7 @@ impl CartridgeType {
                 | Self::HuC3
                 | Self::Mbc6
                 | Self::Mbc7SensorRumbleRamBattery
+                | Self::PocketCamera
         )
     }
 
@@ -246,6 +247,7 @@ impl CartridgeType {
                 | Self::Mbc7SensorRumbleRamBattery
                 | Self::HuC1RamBattery
                 | Self::HuC3
+                | Self::PocketCamera
         )
     }
 
