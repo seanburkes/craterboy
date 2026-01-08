@@ -212,14 +212,14 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
                     }
                     state.handle_key(code, pressed, event.repeat);
 
-                    // Only request redraw if we're more than 8ms away from next scheduled frame
+                    // Only request redraw if we're more than 4ms away from next scheduled frame
                     // This prevents input spam from creating extra emulation frames
                     let now = Instant::now();
                     let time_until_next = next_frame.saturating_duration_since(now);
-                    if time_until_next > Duration::from_millis(8) {
+                    if time_until_next > Duration::from_millis(4) {
                         window.request_redraw();
                     }
-                    // Otherwise, let the scheduled frame handle it (max 8ms latency)
+                    // Otherwise, let the scheduled frame handle it (max 4ms latency)
                 }
             }
             WindowEvent::CursorMoved { .. } => {}
