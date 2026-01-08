@@ -35,6 +35,7 @@ enum MbcKind {
     Mbc5(Mbc5),
     HuC1(HuC1),
     HuC3(HuC3),
+    Mbc6(Box<Mbc6>),
     Mbc7(Mbc7),
 }
 
@@ -67,6 +68,7 @@ impl Mbc {
             | CartridgeType::Mbc5RumbleRamBattery => MbcKind::Mbc5(Mbc5::new()),
             CartridgeType::HuC1RamBattery => MbcKind::HuC1(HuC1::new()),
             CartridgeType::HuC3 => MbcKind::HuC3(HuC3::new()),
+            CartridgeType::Mbc6 => MbcKind::Mbc6(Box::new(Mbc6::new())),
             CartridgeType::Mbc7SensorRumbleRamBattery => MbcKind::Mbc7(Mbc7::new()),
             other => return Err(MbcError::UnsupportedCartridgeType(other)),
         };
@@ -82,6 +84,7 @@ impl Mbc {
             MbcKind::Mbc5(mbc5) => mbc5.read8(cartridge, addr),
             MbcKind::HuC1(huc1) => huc1.read8(cartridge, addr),
             MbcKind::HuC3(huc3) => huc3.read8(cartridge, addr),
+            MbcKind::Mbc6(mbc6) => mbc6.read8(cartridge, addr),
             MbcKind::Mbc7(mbc7) => mbc7.read8(cartridge, addr),
         }
     }
@@ -95,6 +98,7 @@ impl Mbc {
             MbcKind::Mbc5(mbc5) => mbc5.write8(cartridge, addr, value),
             MbcKind::HuC1(huc1) => huc1.write8(cartridge, addr, value),
             MbcKind::HuC3(huc3) => huc3.write8(cartridge, addr, value),
+            MbcKind::Mbc6(mbc6) => mbc6.write8(cartridge, addr, value),
             MbcKind::Mbc7(mbc7) => mbc7.write8(cartridge, addr, value),
         }
     }
@@ -905,6 +909,204 @@ impl HuC3 {
                     }
                 }
             }
+        }
+    }
+}
+
+const MBC6_FLASH_SIZE: usize = 128 * 1024; // 128KB flash
+const MBC6_SRAM_SIZE: usize = 8 * 1024; // 8KB SRAM
+
+#[derive(Debug, Clone)]
+struct Mbc6 {
+    // ROM banking - two separate banks
+    rom_bank_a: u8, // 4000-5FFF
+    rom_bank_b: u8, // 6000-7FFF
+
+    // RAM/Flash banking
+    flash_bank_a: u8, // A000-AFFF
+    flash_bank_b: u8, // B000-BFFF
+
+    // RAM enable
+    ram_enable: bool,
+    flash_enable: bool,
+
+    // Flash memory (128KB)
+    flash: [u8; MBC6_FLASH_SIZE],
+
+    // SRAM (8KB)
+    sram: [u8; MBC6_SRAM_SIZE],
+
+    // Flash command register
+    flash_command: u8,
+}
+
+impl Mbc6 {
+    fn new() -> Self {
+        Self {
+            rom_bank_a: 2,
+            rom_bank_b: 3,
+            flash_bank_a: 0,
+            flash_bank_b: 0,
+            ram_enable: false,
+            flash_enable: false,
+            flash: [0xFF; MBC6_FLASH_SIZE],
+            sram: [0; MBC6_SRAM_SIZE],
+            flash_command: 0,
+        }
+    }
+
+    fn read8(&self, cartridge: &Cartridge, addr: u16) -> u8 {
+        match addr {
+            // Bank 0: 0000-3FFF (fixed)
+            0x0000..=0x3FFF => RomBankMapping::with_banks(&cartridge.bytes, 0, 0).read(addr),
+            // Bank A: 4000-5FFF (switchable)
+            0x4000..=0x5FFF => {
+                let bank_count = bank_count(&cartridge.bytes);
+                let bank = normalize_switchable_bank(self.rom_bank_a as usize, bank_count);
+                let offset = (bank * ROM_BANK_SIZE) + (addr as usize - 0x4000);
+                cartridge.bytes.get(offset).copied().unwrap_or(OPEN_BUS)
+            }
+            // Bank B: 6000-7FFF (switchable)
+            0x6000..=0x7FFF => {
+                let bank_count = bank_count(&cartridge.bytes);
+                let bank = normalize_switchable_bank(self.rom_bank_b as usize, bank_count);
+                let offset = (bank * ROM_BANK_SIZE) + (addr as usize - 0x6000);
+                cartridge.bytes.get(offset).copied().unwrap_or(OPEN_BUS)
+            }
+            // Flash Bank A: A000-AFFF
+            0xA000..=0xAFFF => {
+                if !self.flash_enable {
+                    return OPEN_BUS;
+                }
+                let flash_offset = (self.flash_bank_a as usize * 0x1000) + (addr as usize - 0xA000);
+                if flash_offset < MBC6_FLASH_SIZE {
+                    self.flash[flash_offset]
+                } else {
+                    OPEN_BUS
+                }
+            }
+            // Flash Bank B or SRAM: B000-BFFF
+            0xB000..=0xBFFF => {
+                if self.ram_enable {
+                    // SRAM mode
+                    let sram_offset = (addr as usize - 0xB000) % MBC6_SRAM_SIZE;
+                    self.sram[sram_offset]
+                } else if self.flash_enable {
+                    // Flash mode
+                    let flash_offset =
+                        (self.flash_bank_b as usize * 0x1000) + (addr as usize - 0xB000);
+                    if flash_offset < MBC6_FLASH_SIZE {
+                        self.flash[flash_offset]
+                    } else {
+                        OPEN_BUS
+                    }
+                } else {
+                    OPEN_BUS
+                }
+            }
+            _ => OPEN_BUS,
+        }
+    }
+
+    fn write8(&mut self, cartridge: &mut Cartridge, addr: u16, value: u8) {
+        match addr {
+            // RAM/Flash enable A (A000-AFFF): 0x0A enables flash
+            0x0000..=0x0FFF => {
+                self.flash_enable = value == 0x0A;
+            }
+            // RAM/Flash enable B (B000-BFFF): 0x0A enables SRAM
+            0x1000..=0x1FFF => {
+                self.ram_enable = value == 0x0A;
+            }
+            // Flash control A (2000-27FF): 0x00=read, 0x01=write, 0x10=erase
+            0x2000..=0x27FF => {
+                self.flash_command = value;
+            }
+            // Flash Bank A select (2800-28FF)
+            0x2800..=0x28FF => {
+                self.flash_bank_a = value & 0x7F; // 7-bit
+            }
+            // Flash control B (3000-37FF): 0x00=read, 0x01=write, 0x10=erase
+            0x3000..=0x37FF => {
+                self.flash_command = value;
+            }
+            // Flash Bank B select (3800-38FF)
+            0x3800..=0x38FF => {
+                self.flash_bank_b = value & 0x7F; // 7-bit
+            }
+            // ROM Bank A select (4000-4FFF)
+            0x4000..=0x4FFF => {
+                self.rom_bank_a = value & 0x7F; // 7-bit
+            }
+            // ROM Bank B select (5000-5FFF)
+            0x5000..=0x5FFF => {
+                self.rom_bank_b = value & 0x7F; // 7-bit
+            }
+            // Flash write A: A000-AFFF
+            0xA000..=0xAFFF => {
+                if !self.flash_enable {
+                    return;
+                }
+
+                match self.flash_command {
+                    0x01 => {
+                        // Write mode
+                        let flash_offset =
+                            (self.flash_bank_a as usize * 0x1000) + (addr as usize - 0xA000);
+                        if flash_offset < MBC6_FLASH_SIZE {
+                            // Flash can only change 1 bits to 0 bits
+                            self.flash[flash_offset] &= value;
+                            cartridge.mark_ram_dirty();
+                        }
+                    }
+                    0x10 => {
+                        // Erase sector (4KB)
+                        let sector_start = (self.flash_bank_a as usize) * 0x1000;
+                        if sector_start + 0x1000 <= MBC6_FLASH_SIZE {
+                            self.flash[sector_start..sector_start + 0x1000].fill(0xFF);
+                            cartridge.mark_ram_dirty();
+                        }
+                    }
+                    _ => {
+                        // Read mode (0x00) or unknown - ignore writes
+                    }
+                }
+            }
+            // Flash write B or SRAM: B000-BFFF
+            0xB000..=0xBFFF => {
+                if self.ram_enable {
+                    // SRAM write
+                    let sram_offset = (addr as usize - 0xB000) % MBC6_SRAM_SIZE;
+                    self.sram[sram_offset] = value;
+                    cartridge.mark_ram_dirty();
+                } else if self.flash_enable {
+                    // Flash write B
+                    match self.flash_command {
+                        0x01 => {
+                            // Write mode
+                            let flash_offset =
+                                (self.flash_bank_b as usize * 0x1000) + (addr as usize - 0xB000);
+                            if flash_offset < MBC6_FLASH_SIZE {
+                                // Flash can only change 1 bits to 0 bits
+                                self.flash[flash_offset] &= value;
+                                cartridge.mark_ram_dirty();
+                            }
+                        }
+                        0x10 => {
+                            // Erase sector (4KB)
+                            let sector_start = (self.flash_bank_b as usize) * 0x1000;
+                            if sector_start + 0x1000 <= MBC6_FLASH_SIZE {
+                                self.flash[sector_start..sector_start + 0x1000].fill(0xFF);
+                                cartridge.mark_ram_dirty();
+                            }
+                        }
+                        _ => {
+                            // Read mode (0x00) or unknown - ignore writes
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -2077,6 +2279,220 @@ mod tests {
         mbc.write8(&mut cartridge, 0x6000, 0x00);
         // Should read original RAM value
         assert_eq!(mbc.read8(&cartridge, 0xA000), 0xAA);
+    }
+
+    // MBC6 Tests
+    #[test]
+    fn mbc6_split_rom_banking() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 8];
+        bytes[0x0147] = 0x20; // MBC6
+        bytes[0x0148] = 0x05; // 64 banks (4MB)
+
+        // Fill ROM banks with distinct patterns
+        bytes[ROM_BANK_SIZE * 2..ROM_BANK_SIZE * 3].fill(0x22);
+        bytes[ROM_BANK_SIZE * 3..ROM_BANK_SIZE * 4].fill(0x33);
+        bytes[ROM_BANK_SIZE * 4..ROM_BANK_SIZE * 5].fill(0x44);
+        bytes[ROM_BANK_SIZE * 5..ROM_BANK_SIZE * 6].fill(0x55);
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // ROM bank A (4000-5FFF) - defaults to bank 2
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 0x22);
+
+        // Switch ROM bank A to bank 4
+        mbc.write8(&mut cartridge, 0x4000, 0x04);
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 0x44);
+        assert_eq!(mbc.read8(&cartridge, 0x5FFF), 0x44);
+
+        // ROM bank B (6000-7FFF) - defaults to bank 3
+        assert_eq!(mbc.read8(&cartridge, 0x6000), 0x33);
+
+        // Switch ROM bank B to bank 5
+        mbc.write8(&mut cartridge, 0x5000, 0x05);
+        assert_eq!(mbc.read8(&cartridge, 0x6000), 0x55);
+        assert_eq!(mbc.read8(&cartridge, 0x7FFF), 0x55);
+
+        // Verify banks are independent
+        mbc.write8(&mut cartridge, 0x4000, 0x02);
+        mbc.write8(&mut cartridge, 0x5000, 0x03);
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 0x22);
+        assert_eq!(mbc.read8(&cartridge, 0x6000), 0x33);
+    }
+
+    #[test]
+    fn mbc6_flash_and_sram_enable() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0x20; // MBC6
+        bytes[0x0149] = 0x03; // 32KB RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Initially, flash and SRAM should be disabled
+        // Writes should be ignored, reads should return 0xFF
+        mbc.write8(&mut cartridge, 0xA000, 0xAA);
+        mbc.write8(&mut cartridge, 0xB000, 0xBB);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0xFF);
+        assert_eq!(mbc.read8(&cartridge, 0xB000), 0xFF);
+
+        // Enable flash (A000-AFFF)
+        mbc.write8(&mut cartridge, 0x0000, 0x0A);
+        mbc.write8(&mut cartridge, 0xA000, 0xCC);
+        // Flash writes require commands, but enable should work
+
+        // Enable SRAM (B000-BFFF)
+        mbc.write8(&mut cartridge, 0x1000, 0x0A);
+        mbc.write8(&mut cartridge, 0xB000, 0xDD);
+        assert_eq!(mbc.read8(&cartridge, 0xB000), 0xDD);
+
+        // Disable SRAM
+        mbc.write8(&mut cartridge, 0x1000, 0x00);
+        assert_eq!(mbc.read8(&cartridge, 0xB000), 0xFF);
+    }
+
+    #[test]
+    fn mbc6_flash_bank_switching() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0x20; // MBC6
+        bytes[0x0149] = 0x03; // 32KB RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Enable flash
+        mbc.write8(&mut cartridge, 0x0000, 0x0A);
+
+        // Test Flash Bank A (A000-AFFF)
+        // Set flash bank A to bank 0
+        mbc.write8(&mut cartridge, 0x2800, 0x00);
+        // Enter write mode
+        mbc.write8(&mut cartridge, 0x2000, 0x01);
+        // Write to flash at A000
+        mbc.write8(&mut cartridge, 0xA000, 0xAA);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0xAA);
+
+        // Switch flash bank A to bank 1
+        mbc.write8(&mut cartridge, 0x2800, 0x01);
+        // Different bank should read 0xFF (erased)
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0xFF);
+
+        // Write to bank 1
+        mbc.write8(&mut cartridge, 0xA000, 0xBB);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0xBB);
+
+        // Switch back to bank 0
+        mbc.write8(&mut cartridge, 0x2800, 0x00);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0xAA);
+
+        // Test Flash Bank B (B000-BFFF)
+        // Set flash bank B to bank 2
+        mbc.write8(&mut cartridge, 0x3800, 0x02);
+        // Enter write mode for bank B
+        mbc.write8(&mut cartridge, 0x3000, 0x01);
+        // Write to flash at B000
+        mbc.write8(&mut cartridge, 0xB000, 0xCC);
+        assert_eq!(mbc.read8(&cartridge, 0xB000), 0xCC);
+
+        // Switch flash bank B to bank 3
+        mbc.write8(&mut cartridge, 0x3800, 0x03);
+        // Different bank should read 0xFF (erased)
+        assert_eq!(mbc.read8(&cartridge, 0xB000), 0xFF);
+    }
+
+    #[test]
+    fn mbc6_flash_write_restrictions() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0x20; // MBC6
+        bytes[0x0149] = 0x03; // 32KB RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Enable flash
+        mbc.write8(&mut cartridge, 0x0000, 0x0A);
+        mbc.write8(&mut cartridge, 0x2800, 0x00);
+        mbc.write8(&mut cartridge, 0x2000, 0x01); // Write mode
+
+        // Flash starts erased (all 0xFF)
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0xFF);
+
+        // Can write to change bits from 1 to 0
+        mbc.write8(&mut cartridge, 0xA000, 0xAA); // 10101010
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0xAA);
+
+        // Writing again can only clear more bits (1->0)
+        mbc.write8(&mut cartridge, 0xA000, 0x88); // 10001000
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0x88);
+
+        // Trying to set bits (0->1) should have no effect
+        mbc.write8(&mut cartridge, 0xA000, 0xFF);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0x88); // Still 0x88
+    }
+
+    #[test]
+    fn mbc6_flash_erase_sector() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0x20; // MBC6
+        bytes[0x0149] = 0x03; // 32KB RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Enable flash
+        mbc.write8(&mut cartridge, 0x0000, 0x0A);
+        mbc.write8(&mut cartridge, 0x2800, 0x00);
+        mbc.write8(&mut cartridge, 0x2000, 0x01); // Write mode
+
+        // Write some data
+        mbc.write8(&mut cartridge, 0xA000, 0xAA);
+        mbc.write8(&mut cartridge, 0xA001, 0xBB);
+        mbc.write8(&mut cartridge, 0xA100, 0xCC);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0xAA);
+        assert_eq!(mbc.read8(&cartridge, 0xA001), 0xBB);
+        assert_eq!(mbc.read8(&cartridge, 0xA100), 0xCC);
+
+        // Issue erase command (0x10) to A000
+        mbc.write8(&mut cartridge, 0x2000, 0x10); // Erase command
+        mbc.write8(&mut cartridge, 0xA000, 0x00); // Trigger erase at sector containing A000
+
+        // Entire 4KB sector should be erased to 0xFF
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0xFF);
+        assert_eq!(mbc.read8(&cartridge, 0xA001), 0xFF);
+        assert_eq!(mbc.read8(&cartridge, 0xA100), 0xFF);
+        assert_eq!(mbc.read8(&cartridge, 0xAFFF), 0xFF);
+    }
+
+    #[test]
+    fn mbc6_sram_read_write() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0x20; // MBC6
+        bytes[0x0149] = 0x02; // 8KB RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Enable SRAM (B000-BFFF)
+        mbc.write8(&mut cartridge, 0x1000, 0x0A);
+
+        // Write and read various locations
+        mbc.write8(&mut cartridge, 0xB000, 0x11);
+        mbc.write8(&mut cartridge, 0xB001, 0x22);
+        mbc.write8(&mut cartridge, 0xB7FF, 0x33);
+        mbc.write8(&mut cartridge, 0xBFFF, 0x44);
+
+        assert_eq!(mbc.read8(&cartridge, 0xB000), 0x11);
+        assert_eq!(mbc.read8(&cartridge, 0xB001), 0x22);
+        assert_eq!(mbc.read8(&cartridge, 0xB7FF), 0x33);
+        assert_eq!(mbc.read8(&cartridge, 0xBFFF), 0x44);
+
+        // Test flash bank switching for SRAM (B000-BFFF maps to flash when flash is enabled)
+        mbc.write8(&mut cartridge, 0x3800, 0x00); // Flash bank B = 0
+        mbc.write8(&mut cartridge, 0x3000, 0x01); // Write mode
+
+        // Now B000-BFFF should access flash bank B
+        mbc.write8(&mut cartridge, 0xB000, 0x55);
+        assert_eq!(mbc.read8(&cartridge, 0xB000), 0x55);
     }
 }
 
