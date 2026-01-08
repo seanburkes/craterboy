@@ -33,6 +33,7 @@ enum MbcKind {
     Mbc2(Mbc2),
     Mbc3(Mbc3),
     Mbc5(Mbc5),
+    HuC1(HuC1),
 }
 
 impl Mbc {
@@ -62,6 +63,7 @@ impl Mbc {
             | CartridgeType::Mbc5Rumble
             | CartridgeType::Mbc5RumbleRam
             | CartridgeType::Mbc5RumbleRamBattery => MbcKind::Mbc5(Mbc5::new()),
+            CartridgeType::HuC1RamBattery => MbcKind::HuC1(HuC1::new()),
             other => return Err(MbcError::UnsupportedCartridgeType(other)),
         };
         Ok(Self { kind })
@@ -74,6 +76,7 @@ impl Mbc {
             MbcKind::Mbc2(mbc2) => mbc2.read8(cartridge, addr),
             MbcKind::Mbc3(mbc3) => mbc3.read8(cartridge, addr),
             MbcKind::Mbc5(mbc5) => mbc5.read8(cartridge, addr),
+            MbcKind::HuC1(huc1) => huc1.read8(cartridge, addr),
         }
     }
 
@@ -84,6 +87,7 @@ impl Mbc {
             MbcKind::Mbc2(mbc2) => mbc2.write8(cartridge, addr, value),
             MbcKind::Mbc3(mbc3) => mbc3.write8(cartridge, addr, value),
             MbcKind::Mbc5(mbc5) => mbc5.write8(cartridge, addr, value),
+            MbcKind::HuC1(huc1) => huc1.write8(cartridge, addr, value),
         }
     }
 
@@ -632,6 +636,87 @@ impl Mbc5 {
     }
 }
 
+#[derive(Debug, Clone)]
+struct HuC1 {
+    rom_bank: u8,
+    ram_bank: u8,
+    ir_mode: bool,
+    ir_signal: bool,
+}
+
+impl HuC1 {
+    fn new() -> Self {
+        Self {
+            rom_bank: 1,
+            ram_bank: 0,
+            ir_mode: false,
+            ir_signal: false,
+        }
+    }
+
+    fn read8(&self, cartridge: &Cartridge, addr: u16) -> u8 {
+        match addr {
+            0x0000..=0x7FFF => {
+                let bank_count = bank_count(&cartridge.bytes);
+                let bank = normalize_switchable_bank(self.rom_bank as usize, bank_count);
+                RomBankMapping::with_banks(&cartridge.bytes, 0, bank).read(addr)
+            }
+            EXT_RAM_START..=EXT_RAM_END => {
+                if self.ir_mode {
+                    // IR mode: Read IR register
+                    // Returns 0xC1 if IR signal detected (light), 0xC0 if not
+                    if self.ir_signal { 0xC1 } else { 0xC0 }
+                } else {
+                    // RAM mode: Normal RAM access
+                    let ram_bank = normalize_ram_bank(
+                        self.ram_bank as usize,
+                        ram_bank_count_for(cartridge, 4),
+                    );
+                    read_ext_ram(cartridge, ram_bank, addr)
+                }
+            }
+            _ => OPEN_BUS,
+        }
+    }
+
+    fn write8(&mut self, cartridge: &mut Cartridge, addr: u16, value: u8) {
+        match addr {
+            0x0000..=0x1FFF => {
+                // RAM/IR mode select
+                // Write 0x0E for IR mode, anything else for RAM mode
+                self.ir_mode = value == 0x0E;
+            }
+            0x2000..=0x3FFF => {
+                // ROM bank select (6 bits minimum according to Pan Docs)
+                let bank = value & 0x3F;
+                self.rom_bank = if bank == 0 { 1 } else { bank };
+            }
+            0x4000..=0x5FFF => {
+                // RAM bank select (2 bits minimum)
+                self.ram_bank = value & 0x03;
+            }
+            0x6000..=0x7FFF => {
+                // Unused - games write here but it has no effect
+            }
+            EXT_RAM_START..=EXT_RAM_END => {
+                if self.ir_mode {
+                    // IR mode: Write IR signal control
+                    // 0x01 = IR on, 0x00 = IR off
+                    self.ir_signal = value & 0x01 != 0;
+                } else {
+                    // RAM mode: Normal RAM write
+                    let ram_bank = normalize_ram_bank(
+                        self.ram_bank as usize,
+                        ram_bank_count_for(cartridge, 4),
+                    );
+                    write_ext_ram(cartridge, ram_bank, addr, value);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn read_rom_only(cartridge: &Cartridge, addr: u16) -> u8 {
     match addr {
         0x0000..=0x7FFF => {
@@ -971,6 +1056,166 @@ mod tests {
     fn bank_count_rounds_up() {
         let bytes = vec![0; ROM_BANK_SIZE + 1];
         assert_eq!(bank_count(&bytes), 2);
+    }
+
+    #[test]
+    fn huc1_rom_bank_switching() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 4];
+        bytes[..ROM_BANK_SIZE].fill(0x11);
+        bytes[ROM_BANK_SIZE..ROM_BANK_SIZE * 2].fill(0x22);
+        bytes[ROM_BANK_SIZE * 2..ROM_BANK_SIZE * 3].fill(0x33);
+        bytes[ROM_BANK_SIZE * 3..].fill(0x44);
+        bytes[0x0147] = 0xFF; // HuC1
+        bytes[0x0149] = 0x02; // 8KB RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Default should be bank 1
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 0x22);
+
+        // Switch to bank 2
+        mbc.write8(&mut cartridge, 0x2000, 0x02);
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 0x33);
+
+        // Switch to bank 3
+        mbc.write8(&mut cartridge, 0x2000, 0x03);
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 0x44);
+
+        // Bank 0 should become bank 1
+        mbc.write8(&mut cartridge, 0x2000, 0x00);
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 0x22);
+    }
+
+    #[test]
+    fn huc1_ram_mode_read_write() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0xFF; // HuC1
+        bytes[0x0149] = 0x02; // 8KB RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Default is RAM mode (not IR mode)
+        mbc.write8(&mut cartridge, 0xA000, 0xAB);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0xAB);
+
+        mbc.write8(&mut cartridge, 0xA100, 0xCD);
+        assert_eq!(mbc.read8(&cartridge, 0xA100), 0xCD);
+    }
+
+    #[test]
+    fn huc1_ram_bank_switching() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0xFF; // HuC1
+        bytes[0x0149] = 0x03; // 32KB RAM (4 banks)
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Write to bank 0
+        mbc.write8(&mut cartridge, 0x4000, 0x00);
+        mbc.write8(&mut cartridge, 0xA000, 0x11);
+
+        // Write to bank 1
+        mbc.write8(&mut cartridge, 0x4000, 0x01);
+        mbc.write8(&mut cartridge, 0xA000, 0x22);
+
+        // Write to bank 2
+        mbc.write8(&mut cartridge, 0x4000, 0x02);
+        mbc.write8(&mut cartridge, 0xA000, 0x33);
+
+        // Verify each bank preserved its data
+        mbc.write8(&mut cartridge, 0x4000, 0x00);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0x11);
+
+        mbc.write8(&mut cartridge, 0x4000, 0x01);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0x22);
+
+        mbc.write8(&mut cartridge, 0x4000, 0x02);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0x33);
+    }
+
+    #[test]
+    fn huc1_ir_mode_switching() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0xFF; // HuC1
+        bytes[0x0149] = 0x02; // 8KB RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Start in RAM mode, write some data
+        mbc.write8(&mut cartridge, 0xA000, 0x55);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0x55);
+
+        // Switch to IR mode
+        mbc.write8(&mut cartridge, 0x0000, 0x0E);
+
+        // Read should return IR register (0xC0 for no signal)
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0xC0);
+
+        // Write IR signal on
+        mbc.write8(&mut cartridge, 0xA000, 0x01);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0xC1);
+
+        // Write IR signal off
+        mbc.write8(&mut cartridge, 0xA000, 0x00);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0xC0);
+
+        // Switch back to RAM mode (write anything except 0x0E)
+        mbc.write8(&mut cartridge, 0x0000, 0x00);
+
+        // RAM data should still be there
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0x55);
+    }
+
+    #[test]
+    fn huc1_ir_mode_only_triggers_with_0e() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0xFF; // HuC1
+        bytes[0x0149] = 0x02; // 8KB RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Write data in RAM mode
+        mbc.write8(&mut cartridge, 0xA000, 0xAA);
+
+        // Try various values - none should trigger IR mode except 0x0E
+        for value in [0x00, 0x01, 0x0A, 0x0D, 0x0F, 0xFF] {
+            mbc.write8(&mut cartridge, 0x0000, value);
+            assert_eq!(
+                mbc.read8(&cartridge, 0xA000),
+                0xAA,
+                "Failed for value 0x{:02X}",
+                value
+            );
+        }
+
+        // Now 0x0E should trigger IR mode
+        mbc.write8(&mut cartridge, 0x0000, 0x0E);
+        assert_eq!(mbc.read8(&cartridge, 0xA000), 0xC0);
+    }
+
+    #[test]
+    fn huc1_rom_bank_masks_to_6_bits() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 64];
+        for i in 0..64 {
+            let start = i * ROM_BANK_SIZE;
+            bytes[start..start + ROM_BANK_SIZE].fill(i as u8);
+        }
+        bytes[0x0147] = 0xFF; // HuC1
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Write bank with upper bits set (should be masked)
+        mbc.write8(&mut cartridge, 0x2000, 0xFF); // 0xFF & 0x3F = 0x3F = 63
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 63);
+
+        mbc.write8(&mut cartridge, 0x2000, 0xC0); // 0xC0 & 0x3F = 0x00 -> becomes 1
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 1);
     }
 }
 
