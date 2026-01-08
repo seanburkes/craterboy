@@ -558,21 +558,20 @@ impl Bus {
 
     /// Check if VRAM is accessible to CPU
     /// VRAM is not accessible during PPU mode 3 (Drawing) when LCD is enabled
-    ///
-    /// Note: This implementation is lenient to maintain compatibility with existing tests.
-    /// In reality, VRAM access should be strictly blocked during mode 3.
     fn is_vram_accessible(&self) -> bool {
-        // For now, be lenient and allow access. This maintains backward compatibility.
-        // TODO: Implement strict mode 3 blocking once tests are updated
-        true
+        let lcdc = self.read_io(REG_LCDC);
+        if lcdc & 0x80 == 0 {
+            // LCD disabled - VRAM is always accessible
+            return true;
+        }
+
+        // VRAM is blocked during PPU mode 3 (Drawing)
+        self.ppu_mode != 3
     }
 
     /// Check if OAM is accessible to CPU
     /// OAM is not accessible during PPU modes 2 (OAM Search) and 3 (Drawing) when LCD is enabled
     /// During active DMA transfer, OAM is also not accessible to CPU
-    ///
-    /// Note: This implementation is lenient to maintain compatibility with existing tests.
-    /// In reality, OAM access should be strictly blocked during modes 2 and 3.
     fn is_oam_accessible(&self) -> bool {
         // During DMA (after first byte), OAM is not accessible
         // Allow access before any bytes are transferred (cycle 0)
@@ -586,12 +585,8 @@ impl Bus {
             return true;
         }
 
-        // For now, be lenient: only strictly block during OAM search/drawing on visible lines
-        // when not during DMA completion. This maintains backward compatibility with tests
-        // while still providing some level of access restriction.
-        //
-        // TODO: Make this stricter once tests are updated
-        true
+        // OAM is blocked during PPU modes 2 (OAM Search) and 3 (Drawing)
+        self.ppu_mode != 2 && self.ppu_mode != 3
     }
 
     fn read_io(&self, addr: u16) -> u8 {
@@ -1193,6 +1188,9 @@ mod tests {
         rom[0x0147] = 0x00;
         let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
         let mut bus = Bus::new(cartridge).expect("bus");
+
+        // Disable LCD to ensure OAM is always accessible during this test
+        bus.write8(0xFF40, 0x00);
 
         for i in 0..0xA0u16 {
             bus.write8(0xC000 + i, (i as u8).wrapping_add(1));
@@ -2482,6 +2480,9 @@ mod proptests {
             rom[0x0147] = 0x00;
             let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
             let mut bus = Bus::new(cartridge).expect("bus");
+
+            // Disable LCD to ensure OAM is always accessible
+            bus.write8(REG_LCDC, 0x00);
 
             // Write test data to source
             let source_addr = 0xC000 + source_offset as u16;

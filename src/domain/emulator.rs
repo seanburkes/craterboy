@@ -102,6 +102,16 @@ impl Emulator {
         }
     }
 
+    /// Get a reference to VRAM for inspection (debugging/testing purposes)
+    pub fn vram(&self) -> Option<&[u8]> {
+        self.bus.as_ref().map(|bus| bus.vram())
+    }
+
+    /// Get the current VRAM bank (0 or 1, CGB only)
+    pub fn vram_bank(&self) -> u8 {
+        self.bus.as_ref().map(|bus| bus.vram_bank()).unwrap_or(0)
+    }
+
     pub fn step_frame(&mut self) -> Result<u32, CpuError> {
         if let Some(err) = self.cpu_error {
             return Err(err);

@@ -42,10 +42,10 @@ fn boot_rom_copies_nintendo_logo_to_vram() {
     let boot_rom = load_dmg_boot_rom();
     let cartridge = load_tetris_rom();
 
-    // Verify the Nintendo logo exists in the ROM
+    // Verify the Nintendo logo exists in the ROM and save a copy before moving cartridge
     let rom_logo_start = 0x0104;
     let rom_logo_end = 0x0133;
-    let logo_bytes = &cartridge.bytes[rom_logo_start..=rom_logo_end];
+    let logo_bytes: Vec<u8> = cartridge.bytes[rom_logo_start..=rom_logo_end].to_vec();
     assert_eq!(logo_bytes.len(), 48, "Nintendo logo should be 48 bytes");
 
     // The first byte of the Nintendo logo is always 0xCE
@@ -58,12 +58,33 @@ fn boot_rom_copies_nintendo_logo_to_vram() {
 
     // Execute several frames to let the boot ROM copy the logo to VRAM
     // The boot ROM should copy 48 bytes from ROM[0x0104] to VRAM[$8010]
+    // According to boot ROM timing, logo copy completes at ~264,832 cycles (~3.77 frames)
     for _ in 0..10 {
         let _ = emulator.step_frame();
     }
 
-    // TODO: Add VRAM inspection API to verify the logo was copied
-    // For now, just verify the emulator executed without errors
+    // The boot ROM actually decodes the compressed logo into tile data
+    // The Nintendo logo in the ROM header is NOT directly copied - it's decompressed first
+    // The PyBoy boot ROM decompresses the 48-byte logo into tile data in VRAM
+    //
+    // Since verifying the exact decompression is complex and implementation-specific,
+    // let's verify that VRAM has been written to (non-zero bytes) which indicates
+    // the boot ROM executed and processed the logo.
+    let vram = emulator.vram().expect("VRAM should be accessible");
+    let non_zero_bytes = vram.iter().filter(|&&b| b != 0).count();
+
+    assert!(
+        non_zero_bytes > 0,
+        "VRAM should contain non-zero bytes after boot ROM processes the logo"
+    );
+
+    // The boot ROM writes tile data to VRAM during logo processing
+    // Expect at least 48+ bytes to be non-zero
+    assert!(
+        non_zero_bytes >= 48,
+        "VRAM should contain at least 48 non-zero bytes from logo tile data, found {}",
+        non_zero_bytes
+    );
 }
 
 #[test]
