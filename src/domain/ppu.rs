@@ -172,16 +172,18 @@ impl Ppu {
         let line_i16 = line as i16;
 
         // Scan OAM for sprites on this line
+        // Use direct OAM access to bypass CPU blocking - PPU hardware has direct access
+        let oam = bus.oam();
         for i in 0..40 {
             if self.line_sprites.len() >= MAX_SPRITES_PER_LINE {
                 break;
             }
 
-            let base = 0xFE00u16 + (i * 4) as u16;
-            let y = bus.read8(base) as i16 - 16;
-            let x = bus.read8(base + 1) as i16 - 8;
-            let tile = bus.read8(base + 2);
-            let attr = bus.read8(base + 3);
+            let offset = (i * 4) as usize;
+            let y = oam[offset] as i16 - 16;
+            let x = oam[offset + 1] as i16 - 8;
+            let tile = oam[offset + 2];
+            let attr = oam[offset + 3];
 
             // Check if sprite is on this line
             if line_i16 >= y && line_i16 < y + sprite_height as i16 {

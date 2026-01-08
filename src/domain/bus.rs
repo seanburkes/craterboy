@@ -272,6 +272,12 @@ impl Bus {
         &self.vram[1]
     }
 
+    /// Direct OAM access for PPU hardware (bypasses CPU blocking)
+    /// The PPU has direct access to OAM and is not subject to mode restrictions
+    pub fn oam(&self) -> &[u8] {
+        &self.oam
+    }
+
     pub fn wram_bank(&self) -> u8 {
         self.wram_bank
     }

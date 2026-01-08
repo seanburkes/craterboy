@@ -211,7 +211,15 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
                         toggle_borderless_fullscreen(&window);
                     }
                     state.handle_key(code, pressed, event.repeat);
-                    window.request_redraw();
+
+                    // Only request redraw if we're more than 8ms away from next scheduled frame
+                    // This prevents input spam from creating extra emulation frames
+                    let now = Instant::now();
+                    let time_until_next = next_frame.saturating_duration_since(now);
+                    if time_until_next > Duration::from_millis(8) {
+                        window.request_redraw();
+                    }
+                    // Otherwise, let the scheduled frame handle it (max 8ms latency)
                 }
             }
             WindowEvent::CursorMoved { .. } => {}
@@ -740,7 +748,7 @@ impl State {
             self.cycle_shader();
         }
         self.input.handle_key(code, pressed);
-        self.input.apply(&mut self.emulator);
+        // Don't apply input here - it's applied once per frame in update_frame()
     }
 
     fn set_overlay_metric(&mut self, label: &str, value: impl Into<String>) {
