@@ -693,37 +693,40 @@ impl State {
         #[cfg(feature = "audio")]
         self.audio.enqueue_emulator_samples(&mut self.emulator);
 
-        if self.emulator.has_bus() {
-            return;
-        }
-        if let Some(rom) = self.rom_bytes.as_deref() {
-            if !self.rom_frame_ready {
-                let palette = PALETTES[self.palette_index].colors;
-                Self::render_rom_tiles(
-                    self.emulator.framebuffer_mut().as_mut_slice(),
-                    rom,
-                    palette,
-                );
-                self.rom_frame_ready = true;
+        // If no bus loaded, show fallback graphics
+        if !self.emulator.has_bus() {
+            // Render ROM tile data as fallback
+            if let Some(rom) = self.rom_bytes.as_deref() {
+                if !self.rom_frame_ready {
+                    let palette = PALETTES[self.palette_index].colors;
+                    Self::render_rom_tiles(
+                        self.emulator.framebuffer_mut().as_mut_slice(),
+                        rom,
+                        palette,
+                    );
+                    self.rom_frame_ready = true;
+                }
+                return;
             }
-            return;
-        }
 
-        self.frame_index = self.frame_index.wrapping_add(1);
-        let width = FRAME_WIDTH;
-        let height = FRAME_HEIGHT;
-        let pixels = self.emulator.framebuffer_mut().as_mut_slice();
-        for y in 0..height {
-            for x in 0..width {
-                let idx = (y * width + x) * 3;
-                let r = (x as u8).wrapping_add(self.frame_index);
-                let g = (y as u8).wrapping_add(self.frame_index);
-                let b = (x as u8).wrapping_add(y as u8);
-                pixels[idx] = r;
-                pixels[idx + 1] = g;
-                pixels[idx + 2] = b;
+            // Render test pattern if no ROM at all
+            self.frame_index = self.frame_index.wrapping_add(1);
+            let width = FRAME_WIDTH;
+            let height = FRAME_HEIGHT;
+            let pixels = self.emulator.framebuffer_mut().as_mut_slice();
+            for y in 0..height {
+                for x in 0..width {
+                    let idx = (y * width + x) * 3;
+                    let r = (x as u8).wrapping_add(self.frame_index);
+                    let g = (y as u8).wrapping_add(self.frame_index);
+                    let b = (x as u8).wrapping_add(y as u8);
+                    pixels[idx] = r;
+                    pixels[idx + 1] = g;
+                    pixels[idx + 2] = b;
+                }
             }
         }
+        // Normal path: bus is loaded, emulator.step_frame() already ran and updated framebuffer
     }
 
     fn handle_key(&mut self, code: KeyCode, pressed: bool, repeated: bool) {

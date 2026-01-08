@@ -29,8 +29,12 @@ impl Default for Dma {
 
 impl Dma {
     pub fn new() -> Self {
+        Self::new_with_value(0xFF)
+    }
+
+    pub fn new_with_value(dma: u8) -> Self {
         Self {
-            dma: 0xFF,
+            dma,
             active: false,
             cycles_remaining: 0,
             bytes_transferred: 0,

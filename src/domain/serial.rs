@@ -10,8 +10,8 @@
 // Serial transfer takes 8192 cycles (512 cycles per bit, 8 bits)
 // Internal clock: 8192 cycles (8KHz)
 // External clock: transfers are controlled externally
-const SERIAL_TRANSFER_CYCLES: u32 = 8192;
-const IF_SERIAL: u8 = 0x08;
+pub const SERIAL_TRANSFER_CYCLES: u32 = 8192;
+pub const IF_SERIAL: u8 = 0x08;
 
 #[derive(Debug)]
 pub struct Serial {
