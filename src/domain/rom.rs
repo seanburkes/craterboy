@@ -201,6 +201,9 @@ impl CartridgeType {
                 | Self::Mbc1
                 | Self::Mbc1Ram
                 | Self::Mbc1RamBattery
+                | Self::Mmm01
+                | Self::Mmm01Ram
+                | Self::Mmm01RamBattery
                 | Self::Mbc2
                 | Self::Mbc2Battery
                 | Self::Mbc3
