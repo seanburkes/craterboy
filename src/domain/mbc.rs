@@ -39,6 +39,7 @@ enum MbcKind {
     Mbc6(Box<Mbc6>),
     Mbc7(Mbc7),
     PocketCamera(PocketCamera),
+    Tama5(Tama5),
 }
 
 impl Mbc {
@@ -76,6 +77,7 @@ impl Mbc {
             CartridgeType::Mbc6 => MbcKind::Mbc6(Box::new(Mbc6::new())),
             CartridgeType::Mbc7SensorRumbleRamBattery => MbcKind::Mbc7(Mbc7::new()),
             CartridgeType::PocketCamera => MbcKind::PocketCamera(PocketCamera::new()),
+            CartridgeType::BandaiTama5 => MbcKind::Tama5(Tama5::new()),
             other => return Err(MbcError::UnsupportedCartridgeType(other)),
         };
         Ok(Self { kind })
@@ -94,6 +96,7 @@ impl Mbc {
             MbcKind::Mbc6(mbc6) => mbc6.read8(cartridge, addr),
             MbcKind::Mbc7(mbc7) => mbc7.read8(cartridge, addr),
             MbcKind::PocketCamera(cam) => cam.read8(cartridge, addr),
+            MbcKind::Tama5(tama5) => tama5.read8(cartridge, addr),
         }
     }
 
@@ -110,6 +113,7 @@ impl Mbc {
             MbcKind::Mbc6(mbc6) => mbc6.write8(cartridge, addr, value),
             MbcKind::Mbc7(mbc7) => mbc7.write8(cartridge, addr, value),
             MbcKind::PocketCamera(cam) => cam.write8(cartridge, addr, value),
+            MbcKind::Tama5(tama5) => tama5.write8(cartridge, addr, value),
         }
     }
 
@@ -1821,6 +1825,188 @@ impl PocketCamera {
     }
 }
 
+// Bandai TAMA5 - 0xFD
+// Register-based interface with RTC, used by Tamagotchi game
+// This is the most complex MBC with a unique register-based command system
+#[derive(Debug, Clone)]
+struct Tama5 {
+    rom_bank: u8,
+
+    // Register interface - TAMA5 uses a special register-based access method
+    // Commands and data are written/read through specific addresses
+    data_out: u8,     // Data register for reads
+    data_in_low: u8,  // Lower 4 bits of data input
+    data_in_high: u8, // Upper 4 bits of data input
+    addr_low: u8,     // Lower 4 bits of address/command
+    addr_high: u8,    // Upper 4 bits of address/command
+
+    // RTC registers
+    rtc_seconds: u8,    // 0-59
+    rtc_minutes: u8,    // 0-59
+    rtc_hours_low: u8,  // Lower digit of hours (0-9)
+    rtc_hours_high: u8, // Upper digit of hours (0-2)
+    rtc_days_low: u8,   // Lower 4 bits of days
+    rtc_days_high: u8,  // Upper 4 bits of days
+
+    // Special purpose RAM (32 registers, 4 bits each)
+    // TAMA5 doesn't use standard RAM banks - it has internal registers
+    ram: [u8; 32],
+
+    // Command/mode state
+    command_mode: u8,
+}
+
+impl Tama5 {
+    fn new() -> Self {
+        Self {
+            rom_bank: 1,
+            data_out: 0,
+            data_in_low: 0,
+            data_in_high: 0,
+            addr_low: 0,
+            addr_high: 0,
+            rtc_seconds: 0,
+            rtc_minutes: 0,
+            rtc_hours_low: 0,
+            rtc_hours_high: 0,
+            rtc_days_low: 0,
+            rtc_days_high: 0,
+            ram: [0; 32],
+            command_mode: 0,
+        }
+    }
+
+    fn read8(&self, cartridge: &Cartridge, addr: u16) -> u8 {
+        match addr {
+            // ROM bank 0 (fixed)
+            0x0000..=0x3FFF => {
+                let offset = addr as usize;
+                cartridge.bytes.get(offset).copied().unwrap_or(OPEN_BUS)
+            }
+            // ROM bank 1-31 (switchable)
+            0x4000..=0x7FFF => {
+                let bank_count = bank_count(&cartridge.bytes);
+                let bank = normalize_switchable_bank(self.rom_bank as usize, bank_count);
+                RomBankMapping::with_banks(&cartridge.bytes, 0, bank).read(addr)
+            }
+            // Register interface
+            // TAMA5 uses A000-A001 for reading data
+            EXT_RAM_START..=EXT_RAM_END => {
+                // A000 returns lower 4 bits of data_out
+                // A001 returns upper 4 bits of data_out
+                if addr == 0xA000 {
+                    self.data_out & 0x0F
+                } else if addr == 0xA001 {
+                    (self.data_out >> 4) & 0x0F
+                } else {
+                    OPEN_BUS
+                }
+            }
+            _ => OPEN_BUS,
+        }
+    }
+
+    fn write8(&mut self, cartridge: &mut Cartridge, addr: u16, value: u8) {
+        match addr {
+            // ROM bank selection (0x0000-0x1FFF)
+            0x0000..=0x1FFF => {
+                // Lower 5 bits select ROM bank (0-31)
+                let mut bank = value & 0x1F;
+                if bank == 0 {
+                    bank = 1;
+                }
+                self.rom_bank = bank;
+            }
+            // Command/Address writes
+            0x2000..=0x3FFF => {
+                // This area is used for writing commands and addresses
+                // The exact behavior depends on the address
+                // Simplified implementation
+                self.command_mode = value;
+            }
+            0x4000..=0x5FFF => {
+                // Additional command space
+                self.addr_low = value & 0x0F;
+            }
+            0x6000..=0x7FFF => {
+                // Additional command space
+                self.addr_high = value & 0x0F;
+            }
+            // Register interface
+            EXT_RAM_START..=EXT_RAM_END => {
+                match addr {
+                    // A000 = lower 4 bits of data input
+                    0xA000 => {
+                        self.data_in_low = value & 0x0F;
+                    }
+                    // A001 = upper 4 bits of data input
+                    0xA001 => {
+                        self.data_in_high = value & 0x0F;
+                        // When upper bits are written, process the command
+                        self.process_command();
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn process_command(&mut self) {
+        // Combine the input data
+        let data = self.data_in_low | (self.data_in_high << 4);
+        let addr = self.addr_low | (self.addr_high << 4);
+
+        // TAMA5 command processing (simplified)
+        // Real hardware has complex command modes
+        // We implement basic read/write for RAM and RTC
+
+        match self.command_mode {
+            // RAM write
+            0x00 => {
+                if (addr as usize) < self.ram.len() {
+                    self.ram[addr as usize] = data & 0x0F;
+                }
+            }
+            // RAM read
+            0x01 => {
+                if (addr as usize) < self.ram.len() {
+                    self.data_out = self.ram[addr as usize] & 0x0F;
+                }
+            }
+            // RTC read
+            0x04 => {
+                self.data_out = match addr {
+                    0x00 => self.rtc_seconds & 0x0F,
+                    0x01 => (self.rtc_seconds >> 4) & 0x0F,
+                    0x02 => self.rtc_minutes & 0x0F,
+                    0x03 => (self.rtc_minutes >> 4) & 0x0F,
+                    0x04 => self.rtc_hours_low & 0x0F,
+                    0x05 => self.rtc_hours_high & 0x0F,
+                    0x06 => self.rtc_days_low & 0x0F,
+                    0x07 => self.rtc_days_high & 0x0F,
+                    _ => 0,
+                };
+            }
+            // RTC write
+            0x05 => match addr {
+                0x00 => self.rtc_seconds = (self.rtc_seconds & 0xF0) | (data & 0x0F),
+                0x01 => self.rtc_seconds = (self.rtc_seconds & 0x0F) | ((data & 0x0F) << 4),
+                0x02 => self.rtc_minutes = (self.rtc_minutes & 0xF0) | (data & 0x0F),
+                0x03 => self.rtc_minutes = (self.rtc_minutes & 0x0F) | ((data & 0x0F) << 4),
+                0x04 => self.rtc_hours_low = data & 0x0F,
+                0x05 => self.rtc_hours_high = data & 0x0F,
+                0x06 => self.rtc_days_low = data & 0x0F,
+                0x07 => self.rtc_days_high = data & 0x0F,
+                _ => {}
+            },
+            _ => {
+                // Unknown command - do nothing
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CYCLES_PER_SECOND, Mbc, RtcMode, bank_count};
@@ -2198,6 +2384,167 @@ mod tests {
         // Read back
         assert_eq!(mbc.read8(&cartridge, 0xA040), 0xAA);
         assert_eq!(mbc.read8(&cartridge, 0xB000), 0xBB);
+    }
+
+    #[test]
+    fn tama5_rom_banking() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 4];
+        bytes[..ROM_BANK_SIZE].fill(0x11);
+        bytes[ROM_BANK_SIZE..ROM_BANK_SIZE * 2].fill(0x22);
+        bytes[ROM_BANK_SIZE * 2..ROM_BANK_SIZE * 3].fill(0x33);
+        bytes[ROM_BANK_SIZE * 3..].fill(0x44);
+        bytes[0x0147] = 0xFD; // TAMA5
+        bytes[0x0149] = 0x00; // No standard RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Default should be bank 1
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 0x22);
+
+        // Switch to bank 2
+        mbc.write8(&mut cartridge, 0x0000, 0x02);
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 0x33);
+
+        // Switch to bank 3
+        mbc.write8(&mut cartridge, 0x0000, 0x03);
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 0x44);
+
+        // Bank 0 should become bank 1
+        mbc.write8(&mut cartridge, 0x0000, 0x00);
+        assert_eq!(mbc.read8(&cartridge, 0x4000), 0x22);
+    }
+
+    #[test]
+    fn tama5_register_interface() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0xFD; // TAMA5
+        bytes[0x0149] = 0x00; // No standard RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // TAMA5 uses a register-based interface
+        // Write to internal RAM register 0x05 with value 0xA3
+
+        // Set command mode to RAM write (0x00)
+        mbc.write8(&mut cartridge, 0x2000, 0x00);
+
+        // Set address to 0x05
+        mbc.write8(&mut cartridge, 0x4000, 0x05); // addr_low
+        mbc.write8(&mut cartridge, 0x6000, 0x00); // addr_high
+
+        // Write data 0xA3 (0x03 low, 0x0A high)
+        mbc.write8(&mut cartridge, 0xA000, 0x03); // data_in_low
+        mbc.write8(&mut cartridge, 0xA001, 0x0A); // data_in_high (triggers command)
+
+        // Now read back from register 0x05
+        // Set command mode to RAM read (0x01)
+        mbc.write8(&mut cartridge, 0x2000, 0x01);
+
+        // Set address to 0x05
+        mbc.write8(&mut cartridge, 0x4000, 0x05); // addr_low
+        mbc.write8(&mut cartridge, 0x6000, 0x00); // addr_high
+
+        // Trigger read by writing to A001
+        mbc.write8(&mut cartridge, 0xA000, 0x00);
+        mbc.write8(&mut cartridge, 0xA001, 0x00);
+
+        // Read data from A000 (lower 4 bits) and A001 (upper 4 bits)
+        // TAMA5 stores only 4 bits per register, so we should get 0x03
+        let low = mbc.read8(&cartridge, 0xA000);
+        assert_eq!(low & 0x0F, 0x03);
+    }
+
+    #[test]
+    fn tama5_rtc_read_write() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0xFD; // TAMA5
+        bytes[0x0149] = 0x00; // No standard RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // Write to RTC seconds register
+        // Command mode 0x05 = RTC write
+        mbc.write8(&mut cartridge, 0x2000, 0x05);
+
+        // Write lower digit of seconds (addr 0x00) = 5
+        mbc.write8(&mut cartridge, 0x4000, 0x00);
+        mbc.write8(&mut cartridge, 0x6000, 0x00);
+        mbc.write8(&mut cartridge, 0xA000, 0x05);
+        mbc.write8(&mut cartridge, 0xA001, 0x00);
+
+        // Write upper digit of seconds (addr 0x01) = 3 (total = 35 seconds)
+        mbc.write8(&mut cartridge, 0x4000, 0x01);
+        mbc.write8(&mut cartridge, 0x6000, 0x00);
+        mbc.write8(&mut cartridge, 0xA000, 0x03);
+        mbc.write8(&mut cartridge, 0xA001, 0x00);
+
+        // Read back RTC seconds
+        // Command mode 0x04 = RTC read
+        mbc.write8(&mut cartridge, 0x2000, 0x04);
+
+        // Read lower digit (addr 0x00)
+        mbc.write8(&mut cartridge, 0x4000, 0x00);
+        mbc.write8(&mut cartridge, 0x6000, 0x00);
+        mbc.write8(&mut cartridge, 0xA000, 0x00);
+        mbc.write8(&mut cartridge, 0xA001, 0x00);
+        let low = mbc.read8(&cartridge, 0xA000);
+        assert_eq!(low & 0x0F, 0x05);
+
+        // Read upper digit (addr 0x01)
+        mbc.write8(&mut cartridge, 0x4000, 0x01);
+        mbc.write8(&mut cartridge, 0x6000, 0x00);
+        mbc.write8(&mut cartridge, 0xA000, 0x00);
+        mbc.write8(&mut cartridge, 0xA001, 0x00);
+        let high = mbc.read8(&cartridge, 0xA000);
+        assert_eq!(high & 0x0F, 0x03);
+    }
+
+    #[test]
+    fn tama5_ram_access() {
+        let mut bytes = vec![0; ROM_BANK_SIZE * 2];
+        bytes[0x0147] = 0xFD; // TAMA5
+        bytes[0x0149] = 0x00; // No standard RAM
+
+        let mut cartridge = Cartridge::from_bytes(bytes).expect("cartridge");
+        let mut mbc = Mbc::new(&cartridge).expect("mbc");
+
+        // TAMA5 has 32 internal RAM registers (4 bits each)
+        // Write to several registers and read them back
+
+        // Command mode 0x00 = RAM write
+        mbc.write8(&mut cartridge, 0x2000, 0x00);
+
+        // Write to register 0x00 = value 0x0F
+        mbc.write8(&mut cartridge, 0x4000, 0x00);
+        mbc.write8(&mut cartridge, 0x6000, 0x00);
+        mbc.write8(&mut cartridge, 0xA000, 0x0F);
+        mbc.write8(&mut cartridge, 0xA001, 0x00);
+
+        // Write to register 0x1F (last register) = value 0x07
+        mbc.write8(&mut cartridge, 0x4000, 0x1F);
+        mbc.write8(&mut cartridge, 0x6000, 0x00);
+        mbc.write8(&mut cartridge, 0xA000, 0x07);
+        mbc.write8(&mut cartridge, 0xA001, 0x00);
+
+        // Command mode 0x01 = RAM read
+        mbc.write8(&mut cartridge, 0x2000, 0x01);
+
+        // Read register 0x00
+        mbc.write8(&mut cartridge, 0x4000, 0x00);
+        mbc.write8(&mut cartridge, 0x6000, 0x00);
+        mbc.write8(&mut cartridge, 0xA000, 0x00);
+        mbc.write8(&mut cartridge, 0xA001, 0x00);
+        assert_eq!(mbc.read8(&cartridge, 0xA000) & 0x0F, 0x0F);
+
+        // Read register 0x1F
+        mbc.write8(&mut cartridge, 0x4000, 0x1F);
+        mbc.write8(&mut cartridge, 0x6000, 0x00);
+        mbc.write8(&mut cartridge, 0xA000, 0x00);
+        mbc.write8(&mut cartridge, 0xA001, 0x00);
+        assert_eq!(mbc.read8(&cartridge, 0xA000) & 0x0F, 0x07);
     }
 
     #[test]
