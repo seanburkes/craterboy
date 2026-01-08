@@ -215,6 +215,7 @@ impl CartridgeType {
                 | Self::Mbc5RumbleRam
                 | Self::Mbc5RumbleRamBattery
                 | Self::HuC1RamBattery
+                | Self::HuC3
                 | Self::Mbc7SensorRumbleRamBattery
         )
     }
@@ -239,6 +240,7 @@ impl CartridgeType {
                 | Self::Mbc5RumbleRamBattery
                 | Self::Mbc7SensorRumbleRamBattery
                 | Self::HuC1RamBattery
+                | Self::HuC3
         )
     }
 
