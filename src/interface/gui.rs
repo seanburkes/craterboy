@@ -196,6 +196,8 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
     state.set_overlay_metric("Target", format!("{:.3} ms", target_ms));
     state.set_overlay_metric("Palette", PALETTES[state.palette_index].name);
     state.set_overlay_metric("Shader", state.effect.name());
+    #[cfg(feature = "audio")]
+    state.set_overlay_metric("Audio", "buffering");
 
     let _ = event_loop.run(move |event, elwt| match event {
         Event::WindowEvent { event, window_id } if window_id == target_window_id => match event {
@@ -237,12 +239,6 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
                     return;
                 }
 
-                // Only emulate once per frame period to prevent audio speed-up
-                if !frame_emulated {
-                    state.update_frame();
-                    frame_emulated = true;
-                }
-
                 match state.render() {
                     Ok(()) => {}
                     Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
@@ -264,6 +260,15 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
                 if elapsed >= Duration::from_secs(1) {
                     let fps = fps_frames as f64 / elapsed.as_secs_f64();
                     state.set_overlay_metric("FPS", format!("{:.1}", fps));
+                    #[cfg(feature = "audio")]
+                    state.set_overlay_metric(
+                        "Audio",
+                        format!(
+                            "{:.1} ms / {} underruns",
+                            state.audio.buffered_ms(),
+                            state.audio.underrun_frames()
+                        ),
+                    );
                     fps_frames = 0;
                     fps_last = now;
                 }
@@ -272,14 +277,27 @@ async fn run_async(rom_path: Option<PathBuf>, boot_rom_path: Option<PathBuf>) {
         },
         Event::AboutToWait => {
             let now = Instant::now();
+            #[cfg(feature = "audio")]
+            if state.audio.pause_for_underrun_recovery() || state.audio.needs_refill() {
+                state.refill_audio();
+            }
+
             if now >= next_frame {
                 while next_frame <= now {
                     next_frame += frame_interval;
                 }
-                frame_emulated = false; // Reset flag for new frame period
+                state.update_frame();
+                frame_emulated = true;
                 window.request_redraw();
             }
-            elwt.set_control_flow(ControlFlow::WaitUntil(next_frame));
+
+            let mut wake_at = next_frame;
+            #[cfg(feature = "audio")]
+            {
+                let audio_wake = Instant::now() + state.audio.time_until_refill();
+                wake_at = wake_at.min(audio_wake);
+            }
+            elwt.set_control_flow(ControlFlow::WaitUntil(wake_at));
         }
         _ => {}
     });
@@ -704,10 +722,14 @@ impl State {
             self.input.handle_gamepad(&gamepad, 0.15);
         }
 
-        self.input.apply(&mut self.emulator);
-        let _ = self.emulator.step_frame();
         #[cfg(feature = "audio")]
-        self.audio.enqueue_emulator_samples(&mut self.emulator);
+        self.refill_audio();
+
+        #[cfg(not(feature = "audio"))]
+        {
+            self.input.apply(&mut self.emulator);
+            let _ = self.emulator.step_frame();
+        }
 
         // If no bus loaded, show fallback graphics
         if !self.emulator.has_bus() {
@@ -743,6 +765,20 @@ impl State {
             }
         }
         // Normal path: bus is loaded, emulator.step_frame() already ran and updated framebuffer
+    }
+
+    #[cfg(feature = "audio")]
+    fn refill_audio(&mut self) {
+        const MAX_AUDIO_CATCH_UP_FRAMES: usize = 10;
+
+        self.input.apply(&mut self.emulator);
+        for _ in 0..MAX_AUDIO_CATCH_UP_FRAMES {
+            if !self.audio.needs_refill() || !self.emulator.has_bus() {
+                break;
+            }
+            let _ = self.emulator.step_frame();
+            self.audio.enqueue_emulator_samples(&mut self.emulator);
+        }
     }
 
     fn handle_key(&mut self, code: KeyCode, pressed: bool, repeated: bool) {

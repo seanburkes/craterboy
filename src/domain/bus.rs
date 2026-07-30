@@ -472,6 +472,10 @@ impl Bus {
         self.apu.take_sample_stereo()
     }
 
+    pub fn apu_take_sample_stereo_i16(&mut self) -> (i16, i16) {
+        self.apu.take_sample_stereo_i16()
+    }
+
     pub fn apu_sample(&self) -> i32 {
         self.apu.sample()
     }

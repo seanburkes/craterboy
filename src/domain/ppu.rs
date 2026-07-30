@@ -2,8 +2,8 @@ use super::{Bus, FRAME_HEIGHT, FRAME_WIDTH, Framebuffer};
 
 const FRAME_CYCLES: u32 = 70224;
 const CYCLES_PER_SECOND: u32 = 4_194_304;
-pub const FRAME_RATE_HZ: u32 = CYCLES_PER_SECOND / FRAME_CYCLES;
-pub const FRAME_INTERVAL_NS: u64 = 1_000_000_000 / FRAME_RATE_HZ as u64;
+pub const FRAME_INTERVAL_NS: u64 =
+    (FRAME_CYCLES as u64 * 1_000_000_000 + CYCLES_PER_SECOND as u64 / 2) / CYCLES_PER_SECOND as u64;
 const SCANLINE_CYCLES: u32 = 456;
 const _OAM_SEARCH_CYCLES: u32 = 80;
 const _DRAWING_CYCLES: u32 = 172;
@@ -440,7 +440,7 @@ impl Ppu {
 
 #[cfg(test)]
 mod tests {
-    use super::Ppu;
+    use super::{CYCLES_PER_SECOND, FRAME_CYCLES, FRAME_INTERVAL_NS, Ppu};
     use crate::domain::cartridge::ROM_BANK_SIZE;
     use crate::domain::{Bus, Cartridge, Framebuffer};
 
@@ -451,6 +451,15 @@ mod tests {
         rom[0x0147] = 0x00;
         let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
         Bus::new(cartridge).expect("bus")
+    }
+
+    #[test]
+    fn frame_interval_uses_exact_hardware_rate() {
+        let expected = FRAME_CYCLES as f64 / CYCLES_PER_SECOND as f64;
+        let actual = FRAME_INTERVAL_NS as f64 / 1_000_000_000.0;
+
+        assert!((actual - expected).abs() < 0.5e-9);
+        assert_eq!(FRAME_INTERVAL_NS, 16_742_706);
     }
 
     #[test]
