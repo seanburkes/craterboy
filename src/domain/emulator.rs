@@ -128,8 +128,13 @@ impl Emulator {
                         return Err(err);
                     }
                 };
+                let subsystem_cycles = if bus.is_double_speed() {
+                    step_cycles / 2
+                } else {
+                    step_cycles
+                };
                 bus.step(step_cycles);
-                frame_ready = self.ppu.step(step_cycles, bus, &mut self.framebuffer);
+                frame_ready = self.ppu.step(subsystem_cycles, bus, &mut self.framebuffer);
                 cycles = cycles.saturating_add(step_cycles);
 
                 if bus.take_boot_rom_disabled() {
@@ -179,6 +184,13 @@ impl Emulator {
         self.bus
             .as_mut()
             .map(|bus| bus.apu_take_sample_stereo())
+            .unwrap_or((0, 0))
+    }
+
+    pub fn apu_take_sample_stereo_i16(&mut self) -> (i16, i16) {
+        self.bus
+            .as_mut()
+            .map(|bus| bus.apu_take_sample_stereo_i16())
             .unwrap_or((0, 0))
     }
 
@@ -298,6 +310,38 @@ mod tests {
         let sample = emulator.apu_take_sample();
         assert!((-128..=127).contains(&sample));
         assert!(!emulator.apu_has_sample());
+    }
+
+    #[test]
+    fn double_speed_frame_generates_a_full_frame_of_audio() {
+        let mut rom = vec![0; ROM_BANK_SIZE];
+        rom[0x0143] = 0x80;
+        rom[0x0147] = 0x00;
+        let cartridge = Cartridge::from_bytes(rom).expect("cartridge");
+        let mut emulator = Emulator::new();
+        emulator.load_cartridge(cartridge).expect("load cartridge");
+
+        emulator.step_frame().expect("normal-speed frame");
+        let mut normal_samples: usize = 0;
+        while emulator.apu_has_sample() {
+            emulator.apu_take_sample_stereo();
+            normal_samples += 1;
+        }
+
+        let bus = emulator.bus.as_mut().expect("bus");
+        bus.write8(0xFF4D, 0x01);
+        bus.perform_speed_switch();
+        assert!(bus.is_double_speed());
+
+        emulator.step_frame().expect("double-speed frame");
+        let mut double_speed_samples: usize = 0;
+        while emulator.apu_has_sample() {
+            emulator.apu_take_sample_stereo();
+            double_speed_samples += 1;
+        }
+
+        assert!(normal_samples > 0);
+        assert!(double_speed_samples.abs_diff(normal_samples) <= 1);
     }
 
     #[test]
